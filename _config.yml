@@ -2,7 +2,7 @@ title: no style, please! # name of the site
 author: 1ac # name of site's author
 email: borodenkov.e.a@gmail.com # email of site's author
 url: https://1ac.github.io # root address of the site
-baseurl: "" # subpath of the site, e.g. "/blog"
+baseurl: "/" # subpath of the site, e.g. "/blog"
 description: > # description of the site (multiple lines allowed)
   A (nearly) no-CSS, fast, minimalist Jekyll theme.
 
