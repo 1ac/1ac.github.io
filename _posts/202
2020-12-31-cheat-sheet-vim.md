@@ -5,9 +5,9 @@ category: cheatSheet
 ---
 
 Table of contents
-- [Operating modes](#operating_modes)
-- [Moving around the text](#moving_around_the_text)
-- [Remove, copy & past](#remove_copy_past)
+- [Operating modes](#operatingModes)
+- [Moving around the text](#movingAroundTheText)
+- [Remove, copy & past](#removeCopyPast)
 - [Macros](#macros)
 
 ___
