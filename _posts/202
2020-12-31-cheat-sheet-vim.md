@@ -1,10 +1,7 @@
 ---
 layout: post
 title: Cheat sheet vim
-date: '2020-12-31 00:00:00'
-tags:
-- cheat_sheet
-- vim
+category: cheatSheet
 ---
 
 ## Table of contents
@@ -12,8 +9,7 @@ tags:
 - [Перемещения по тексту](#moving_around_the_text)
 - [Удаление, копирование и вставка](#remove_copy_past)
 - [The end](#the-end)
-
-_______________________________________________________
+___
 
 # [Режимы работы](#operating_modes)
 |командный режим|	ESC|
