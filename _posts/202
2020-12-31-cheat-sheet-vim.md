@@ -11,6 +11,17 @@ Table of contents
 - [The end](#the-end)
 ___
 
+
+Now a table:
+
+| Tables        | Are           | Cool  |
+| ------------- |:-------------:| -----:|
+| col 3 is      | right-aligned | $1600 |
+| col 2 is      | centered      |   $12 |
+| zebra stripes | are neat      |    $1 |
+
+________________________
+
 # [Режимы работы](#operating_modes)
 
 | description        | key           |
