@@ -110,9 +110,11 @@ Use the ‘sar’ command line tool to collect, view and record performance data
 Miscellaneous
 
 Following are some other performance tips that are categorized as miscellaneous.
+
 18. Move Log files to RAM
 
 When a machine is running, it is better to keep system logs in RAM and copy them to disk when the system is shut down. When you’re running a laptop or mobile device with ‘syslog’ enabled, ‘Ramlog’ might help to improve system battery life or the life of the flash drive on a mobile device. One advantage of using ‘Ramlog’ is that you’re less likely to be caught by a daemon that suddenly starts sending a message to ‘syslog’ every 30 seconds and – worse – saps battery by keeping the hard disk spinning.
+
 19. Wrap up
 
 When there is a fixed chunk of RAM containing the log files, it means that a laptop’s hard disk doesn’t have to spin up regularly if something needs to be logged by an overly verbose daemon. The fixed-size RAM disk ‘Ramlog’ will keep an overly verbose daemon from exhausting all the system RAM. By using a solid-state disk on a laptop with a few gigabytes of RAM, ‘Ramlog’ can save many write cycles by sacrificing 50-80MB of RAM.
@@ -168,6 +170,7 @@ cpu time               (seconds, -t) unlimited
 max user processes              (-u) 256957
 virtual memory          (kbytes, -v) unlimited
 file locks                      (-x) unlimited
+
 Обратим внимание на open files, max user processes и max locked memory. Это стандартные ограничения, которые нужно убрать, если хотим держаться под нагрузкой. Перед изменениями хочу предупредить, что если железо недостаточно мощное, то ваш сервер может подвергнуться атаке типа fork bomb, так что аккуратно раздавайте права на сервере.
 Приведем /etc/security/limits.conf к такому виду.
 *   soft    nproc   65000
@@ -184,6 +187,8 @@ sysctl.conf
 В /etc/sysctl.conf настраиваются параметры ядра, модулей и других подсистем. По сути, можно вручную менять значения псевдо-фс /proc, но такие изменения не сохранятся после перезагрузки, поэтому будем сразу вносить изменения в этот конфиг файл.
 Для пользователей systemd этот файл уже не играет роли. Если вы вдруг используете systemd, вам нужно править файлы в /etc/sysctl.d/. Подробнее читайте на http://www.freedesktop.org/software/systemd/man/sysctl.d.html
 Вот пример моего sysctl.conf для высоконагруженной системы.
+
+```
 net.ipv4.conf.default.rp_filter = 1
 net.ipv4.conf.default.accept_source_route = 0
 kernel.sysrq = 0
@@ -216,6 +221,8 @@ net.ipv4.tcp_tw_recycle = 0
 net.ipv4.tcp_max_tw_buckets = 1000000
 net.ipv4.ip_local_port_range = 1024 65535
 net.nf_conntrack_max = 1000000
+```
+
 Подробно про все опции, можно прочитать в man proc Или, например, здесь. А тут написано как люди выдерживают миллион pps в секунду и приведены примеры используемых sysctl.conf
 После изменения sysctl.conf применим наши правки.
 sudo sysctl -p
