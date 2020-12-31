@@ -12,7 +12,7 @@ Table of contents
 
 ___
 
-# [Operating modes](#operating_modes)
+# [Operating modes](#operatingModes)
 
 | description        | key           |
 | ------------- |:-------------:| 
@@ -30,7 +30,7 @@ ___
 ___
 
 
-# [Moving around the text](#moving_around_the_text)
+# [Moving around the text](#movingAroundTheText)
 
 | description        | key           |
 | ------------- |:-------------:| 
@@ -58,7 +58,7 @@ ___
 ___
 
 
-# [Remove, copy & past](#remove_copy_past)
+# [Remove, copy & past](#removeCopyPast)
 
 | description        | key           |
 | ------------- |:-------------:| 
