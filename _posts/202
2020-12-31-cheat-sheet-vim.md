@@ -12,6 +12,7 @@ Table of contents
 ___
 
 # [Режимы работы](#operating_modes)
+
 | description        | key           |
 | ------------- |:-------------:| 
 | командный режим |		ESC |
