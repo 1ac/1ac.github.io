@@ -4,7 +4,7 @@ title: Cheat sheet vim
 category: cheatSheet
 ---
 
-## Table of contents
+Table of contents
 - [Режимы работы](#operating_modes)
 - [Перемещения по тексту](#moving_around_the_text)
 - [Удаление, копирование и вставка](#remove_copy_past)
