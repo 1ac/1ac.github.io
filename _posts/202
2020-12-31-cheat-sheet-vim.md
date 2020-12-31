@@ -5,14 +5,14 @@ category: cheatSheet
 ---
 
 Table of contents
-- [Режимы работы](#operating_modes)
-- [Перемещения по тексту](#moving_around_the_text)
-- [Удаление, копирование и вставка](#remove_copy_past)
+- [Operating modes](#operating_modes)
+- [Moving around the text](#moving_around_the_text)
+- [Remove, copy & past](#remove_copy_past)
 - [Macros](#macros)
 
-________________________
+___
 
-# [Режимы работы](#operating_modes)
+# [Operating modes](#operating_modes)
 
 | description        | key           |
 | ------------- |:-------------:| 
@@ -27,10 +27,10 @@ ________________________
 | сохранить и выйти |		:wq ENTER |
 | выйти без сохранения |		:q! Enter |
 
-________________________
+___
 
 
-# [Перемещения по тексту](#moving_around_the_text)
+# [Moving around the text](#moving_around_the_text)
 
 | description        | key           |
 | ------------- |:-------------:| 
@@ -55,10 +55,10 @@ ________________________
 |установить на текущей строке метку с номером x (для примера)|	mx|
 |перейти на метку с номером x|	’x|
 
-________________________
+___
 
 
-# [Удаление, копирование и вставка](#remove_copy_past)
+# [Remove, copy & past](#remove_copy_past)
 
 | description        | key           |
 | ------------- |:-------------:| 
@@ -77,7 +77,7 @@ ________________________
 |(точка) повторить последнее действие ещё раз|	.|
 |удалить 5 слов (для примера). Можно повторять действия, указав перед ним число|	5dw|
 
-________________________
+___
 
 # [Macros](#macros)
 
