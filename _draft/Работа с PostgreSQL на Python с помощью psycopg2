@@ -1,0 +1,109 @@
+Работа с PostgreSQL на Python с помощью psycopg2
+5 ноября 2019
+
+Недавно мне понадобилось сходить в PostgreSQL из скрипта на Python. Была предпринята попытка воспользоваться для этого библиотекой py-postgresql, поскольку я успешно использовал ее в прошлом. Но оказалось, что py-postgresql не работает с последними версиями постгреса. В моем случае использовался PostgreSQL 11. Ну что же, тогда не будем выпендриваться, и возьмем используемый всеми psycopg2. Поскольку интерфейс psycopg2 заметно отличается от интерфейса py-postgresql, было решено написать небольшую памятку по использованию данной библиотеки.
+
+Как обычно в мире Python, библиотека устанавливается через pip и при желании изолируется от других проектов с помощью virtualenv:
+
+pip3 install psycopg2-binary
+В MacOS вполне достаточно этой одной команды. В Linux может потребоваться вручную подтянуть библиотеку libpq, поскольку psycopg2 построен на ее базе:
+
+sudo apt install libpq-dev
+Соединение с СУБД осуществляется так:
+
+import psycopg2
+conn = psycopg2.connect(database="mydb", user="afiskon",
+    password="s3cr3t", host="localhost", port=5432)
+Иногда бывает полезно узнать используемую версию libpq. Она доступна через переменную psycopg2.__libpq_version__. Переменная содержит число вроде 11002 (libpq 11.2) или 90613 (libpq 9.6.13).
+
+Взаимодействие с базой осуществляется при помощи отдельного класса, cursor:
+
+cur = conn.cursor()
+Пример создания таблицы:
+
+cur.execute("CREATE TABLE users (id SERIAL PRIMARY KEY, " +
+    "login VARCHAR(64), password VARCHAR(64))")
+conn.commit()
+Заметьте, что коммит транзакции осуществляется через класс connection, а не cursor.
+
+Пример заполнения таблицы:
+
+cur.execute("INSERT INTO users (login, password) VALUES (%s, %s)",
+    ("afiskon", "123"))
+cur.execute("INSERT INTO users (login, password) VALUES (%s, %s)",
+    ("eax", "456"))
+conn.commit()
+То же самое, но через prepared statements:
+
+cur.execute("PREPARE insuser AS " +
+    "INSERT INTO users (login, password) VALUES ($1, $2)")
+cur.execute("EXECUTE insuser(%s, %s)", ("afiskon", "123"))
+cur.execute("EXECUTE insuser(%s, %s)", ("eax", "456"))
+conn.commit()
+Пример SELECT-запроса:
+
+cur.execute("SELECT id, login, password FROM users")
+cur.fetchall()
+# [(1, 'afiskon', '123'), (2, 'eax', '456')]
+Можно читать и по одному картежу:
+
+cur.execute("SELECT id, login, password FROM users")
+cur.fetchone()
+# (1, 'afiskon', '123')
+cur.fetchone()
+# (2, 'eax', '456')
+cur.fetchone() is None
+# True
+Также класс cursor может быть использован в цилке for:
+
+cur.execute("SELECT id, login, password FROM users")
+for row in cur:
+    print(row)
+# (1, 'afiskon', '123')
+# (2, 'eax', '456')
+Параметрам запроса можно присваивать имена. Например, как в этом UPDATE-запросе:
+
+cur.execute("UPDATE users SET password = %(password)s WHERE " +
+    "login = %(login)s", {"login":"eax", "password":"789"})
+conn.commit()
+На плейсхолдерах значений всегда должно стоять %s, даже если передается целое число или иной тип. Например, как в следующем DELETE-запросе:
+
+cur.execute("DELETE FROM users WHERE id = %s", (2,))
+conn.commit()
+Заметьте, что методу execute передается картеж из одного элемента. Если передать просто один аргумент без картежа, метод взорвется с ошибкой:
+
+TypeError: 'int' object does not support indexing
+Пример вызова хранимки:
+
+cur.execute("SELECT version()")
+cur.fetchall()
+# [('PostgreSQL 11.5 (Ubuntu ...трали-вали три педали',)]
+По завершении работы с курсором его следует закрыть:
+
+cur.close()
+Чтобы постоянно не думать про все эти conn.commit() и cur.close(), лучше выполнять транзакции в with-блоках:
+
+with conn:
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO users (login, password) " +
+                    "VALUES (%s, %s)", ("r2auk", "789"))
+Заметьте, что conn также должен быть взят в with. Если во время исполнения кода не будет брошено исключение, транзакция закоммитится. Иначе она откатится. Так или иначе, все ресурсы, выделенные под cursor, будут освобождены. Соединение с СУБД остается открытым.
+
+Чтобы явно откатить транзакцию, используйте метод rollback класса connection:
+
+with conn:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM users")
+        conn.rollback()
+Чтобы закрыть соединение с СУБД, используйте метод close:
+
+conn = psycopg2.connect( ... )
+try:
+    # работаем с базой
+finally:
+    conn.close()
+Конечно же, описать абсолютно все нюансы работы c psycopg2 в рамках одного поста не представляется возможным. Дополнительные сведения вы найдете в официальной документации.
+
+А как вы работаете с PostgreSQL из Python?
+
+Метки: PostgreSQL, Python, СУБД.

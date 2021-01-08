@@ -1,0 +1,140 @@
+Установка и настройка Nginx, пара несложных примеров
+27 октября 2014
+
+Эта заметка в первую очередь предназначена для начинающих разработчиков. Во всяком случае, тех из них, кому еще ни разу не доводилось устанавливать и настраивать Nginx. Цель поста заключается в том, чтобы показать, насколько легко и непринужденно происходит эти самые установка с настройкой, а также что Nginx не нужно бояться и не стоит без лишней необходимости перекладывать его настройку на админов.
+
+Nginx (произносится «энжин икс») — это легковесный веб-сервер (на самом деле, не только веб-), созданный Игорем Сысоевым. Nginx используется дофига где, в том числе в Mail.ru, Яндексе, Рамблере, и великом-великом множестве других высоконагруженных и не очень веб-проектов. Вот далеко неполный список возможных применений Nginx:
+
+Ваше приложение умеет HTTP, а вы решили дополнительно прикрутить SSL, gzip или, возможно, SPDY;
+У вас много приложений, но вы хотите, чтобы все они были на 80-м порту и отвечали за разные URL;
+Вы хотите быстро раздавать статику;
+Приложение поднято на разных серверах и вы хотите (1) распределять нагрузку между ними, (2) если один из серверов прилег, успешно отвечать на запросы при помощи оставшихся;
+Запросы обрабатываются приложением медленно и вы хотите их кэшировать;
+Написанное вами приложение не умеет логировать HTTP-запросы;
+Доступ к ресурсу нужно ограничить по логину и паролю, либо по IP;
+У вас LAMP и при большом числе запросов начинает заканчиваться память (см заметку об оптимизации WordPress);
+Вы изменили URL ресурса и хотите настроить редирект со старого URL для обратной совместимости;
+Вам хочется делать все написанное выше одновременно;
+Устанавливается Nginx очень просто:
+
+sudo apt-get install nginx
+sudo service nginx start
+wget localhost:80 -O -
+Должны увидеть «Welcome to nginx».
+
+Логи запросов и ошибок пишутся в /var/log/nginx/. Конфиги лежат в /etc/nginx/. В подкаталоге sites-available складываются все-все конфиги, даже те, которые вы раньше использовали, а теперь не используете. В sites-enabled складываются используемые конфиги, принято делать их линками на конфиги в sites-available.
+
+После правки конфигов стоит проверить их на наличие синтаксических ошибок:
+
+sudo nginx -t
+Nginx умеет перечитывать конфиги без перезапуска. Для этого нужно сказать:
+
+sudo service nginx reload
+После reload обязательно проверяйте по логам, нет сыпятся ли какие ошибки:
+
+sudo tail -f /var/log/nginx/error.log
+Рассмотрим пример. Допустим, вы записываете свой подкаст и решили его раздавать при помощи друплета в DigitalOcean. Тогда вот как примерно будет выглядеть ваш конфиг Nginx:
+
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server ipv6only=on;
+  limit_rate 512k;
+  server_tokens off;
+  error_page 403 http://devzen.ru/;
+  error_page 404 http://devzen.ru/;
+
+  root /var/www;
+  index index.html index.htm;
+
+  # Make site accessible from http://localhost/
+  server_name localhost;
+
+  location / {
+    # First attempt to serve request as file, then
+    # as directory, then fall back to displaying a 404.
+    try_files $uri $uri/ =404;
+  }
+По большому счету все, что мы тут говорим Nginx — это (1) слушай порт 80, (2) отдавай файлы со скоростью не больше 512 кбайт в секунду, (3) в случае ошибок 403 или 404 делай редирект на указанный хост, (4) раздавай файлы из каталога /var/www, (5) если пользователь запросил каталог, и в нем есть файл с именем index.html или index.htm, отдавать этот файл. Совсем несложно, правда?
+
+Рассмотрим еще один пример. Допустим, ваше приложение крутится в AWS и общается с миром при помощи вебсокетов. Вам хочется зашифровать трафик при помощи SSL. Нет проблем:
+
+map $http_upgrade $connection_upgrade {
+  default upgrade;
+  '' close;
+}
+
+upstream websocket {
+  server localhost:1234;
+}
+
+server {
+  listen 443;
+  location / {
+    proxy_pass http://websocket;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+
+  ssl on;
+  ssl_certificate /etc/nginx/nginx.crt;
+  ssl_certificate_key /etc/nginx/nginx.key;
+
+  ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+  ssl_ciphers "HIGH:!aNULL:!MD5 or HIGH:!aNULL:!MD5:!3DES";
+  ssl_prefer_server_ciphers on;
+
+  # see http://nginx.com/blog/improve-seo-https-nginx/
+  ssl_session_cache shared:SSL:100m;
+  ssl_session_timeout 12h;
+}
+Здесь мы говрим nginx (1) слушать порт 443 и пробрасывать все запросы на localhost:1234, (2) при пробросе устанавливать заголовок с IP пользователя, (3) включить SSL без дырявого SSLv3, (4) выделить 100 Мб памяти под SSL сессии.
+
+Наконец, последний пример. Ваш REST-сервис крутится в Hetzner, отдает данные в форматах JSON и CSV, а также генерирует бесконечные стримы событий (JSON в chunked transfer encoding). Генерация стримов требует большого количества ресурсов, поэтому их вы хотите пробросить на отдельное множество машин. Также вы хотите сжимать трафик при помощи gzip.
+
+Соответствующих конфиг:
+
+upstream service_default {
+  server localhost:1234;
+}
+
+map _ $service_upstream {
+  default service_default;
+}
+
+include /etc/nginx/myservice.d/*.conf;
+
+server {
+  listen 80;
+  chunked_transfer_encoding on;
+  proxy_buffering off;
+  tcp_nodelay off;
+  proxy_read_timeout 1800;
+  proxy_send_timeout 1800;
+
+  location ~* ^/api/.*/streams/.*$ {
+    proxy_pass http://$service_upstream;
+    proxy_next_upstream timeout http_500 http_502 http_503;
+    proxy_redirect off;
+    proxy_connect_timeout 30s;
+  }
+
+  location / {
+    proxy_pass http://localhost:1234;
+  }
+
+  gzip on;
+  gzip_comp_level 6;
+  gzip_proxied any;
+  gzip_types application/json application/x-json-stream;
+}
+Полагаю, к этому моменту вы уже сами можете понять, о чем идет речь. В случае чего обращайтесь к официальной документации по Nginx, она классная и в ней все есть. Также обратите внимание на официальные списки рассылки.
+
+Собственно, это все, о чем я хотел поведать. А как вы используете Nginx?
+
+Дополнение: Чтобы Nginx не раскрывал информацию об операционной системе и своей версии, нужно в nginx.conf добавить server_tokens off; в блоке http {.
+
+Дополнение: Вас также могут заинтересовать статьи Настройка HTTPS с сертификатами Let’s Encrypt и Памятка по использованию WebDAV.
+
+Метки: Linux.

@@ -1,0 +1,55 @@
+Простейший IRC-бот на Python, а также при чем тут Slack, Gitter и прочие веб-чаты
+28 ноября 2016
+
+Иногда бывает нужно синтегрироваться со Slack, Gitter, или подобного рода веб-чатом. Например, посылать в него сообщение при происшествии определенного события. К сожалению, подобные сервисы имеют сильно разные и иногда не слишком удобные для этих целей API. Зато многие, включая тот же Slack и Gitter, позволяют ходить в них по IRC. Более того, с помощью программы bitlbee по IRC можно ходить еще и в Skype, Jabber, Twitter и многое другое. Грех этим не воспользоваться.
+
+Ниже приведен код скрипта, отправляющего заданный список сообщений по IRC:
+
+#!/usr/bin/env python3
+
+# (c) Aleksander Alekseev 2016, http://eax.me/
+
+import socket, ssl, time
+
+def irc_send(conf, msg_list):
+    if msg_list == []:
+        return
+    tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    ssl_sock = ssl.wrap_socket(tcp_sock)
+    ssl_sock.connect( (conf['host'], int(conf['port'])) )
+
+    def ssl_send(cmd):
+        ssl_sock.write(cmd.encode() + b'\r\n')
+
+    ssl_send('USER {0} localhost localhost {0}'.format(conf['nick']))
+    ssl_send('NICK {}'.format(conf['nick']))
+    ssl_send('PASS {}'.format(conf['password']))
+    ssl_send('JOIN #{}'.format(conf['channel']))
+    for msg in msg_list:
+        ssl_send('PRIVMSG #{} :{}'.format(conf['channel'], msg))
+        # time.sleep(1.1)
+    ssl_send('QUIT')
+
+    while True:
+        data = ssl_sock.read()
+        if data == b'': # enf of file
+            break
+
+    ssl_sock.close()
+
+irc_config = {
+    'host': 'irc.gitter.im',
+    'port': '6667',
+    'nick': 'devzen_ru_twitter',
+    'password': 'SECRET',
+    'channel': 'DevZenRu/live'
+}
+
+irc_send(irc_config, ['Message 1', 'Message 2'])
+Здесь используется собственная реализация протокола, поскольку мне не очень нравится интерфейс существующих реализаций, того же пакета irc, а также потому что мне нужно было просто отправить сообщение в чат и тут же отключиться. Учитывая простоту протокола, удобнее написать свои пять строк кода и не тянуть лишние зависимости, для использования которых потребуется еще и использовать virtualenv.
+
+Если вам нужно написать что-то чуть более сложное, например, собирать логи, или выполнять команды пользователей в чате, вас может заинтересовать проект Legobot. Обратите также внимание на мою старую заметку Краткое описание протокола IRC и пример бота. Протокол IRC действительно прост до безобразия, поэтому, возможно, и нет смысла использовать для него зависимости.
+
+Собственно, это весь пост. Вопросы, дополнения?
+
+Метки: Python, Протоколы, Сети.

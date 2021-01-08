@@ -1,0 +1,188 @@
+PostgreSQL: сборка из исходников и настройка под Linux
+3 марта 2016
+
+СУБД является важнейшим компонентом многих современных систем. Поэтому совершенно естественным является желание собрать эту СУБД из исходников самостоятельно с флагами -march=native -O3, не говоря уже о куда более тонкой настойке при помощи скрипта configure. В этом случае вы также можете подобрать компилятор, который лучше оптимизирует конкретную СУБД под ваши конкретные задачи. Не исключено также, что готового бинарного пакета нужной вам версии приложения еще попросту не существует. Наконец, умение самостоятельно собирать и настраивать приложение дает куда более лучшее понимание его работы, чем простое запоминание каталогов с конфигами и логами. В силу названных причин, давайте попробуем разобраться, как собрать из исходников PostgreSQL, а затем настроить его для полноценной работы.
+
+Я ставил свои эксперименты под Ubuntu Linux 14.04 LTS и PostgreSQL 9.5, но последовательность действий для других *nix систем и версий PostgreSQL не должна сильно отличаться. Поскольку для сборки PostgreSQL нам понадобится ряд пакетов, не требуемых во время работы СУБД, для сборки лучше создать LXC контейнер, чтобы эти пакеты не засоряли основную систему.
+
+Перекрестная ссылка: Вас также может заинтересовать заметка Начало работы с PostgreSQL. В частности, в ней рассказывается, для чего нужны файлы pg_hba.conf и postgresql.conf, как пользоваться утилитой psql, а также как производится резервное копирование и восстановление PostgreSQL. Далее предполагается, что все это вы уже знаете.
+
+Получаем исходники
+Исходники PostgreSQL можно получить по HTTP или из Git-репозитория.
+
+Пойдем сложным путем на случай, если вас интересует конкретная ветка или самый свежий код из master:
+
+git clone http://git.postgresql.org/git/postgresql.git
+Это займет какое-то время. Затем говорим:
+
+cd postgresql
+git checkout (ветка)
+Ура, теперь у нас есть исходники.
+
+Сборка
+Для сборки при помощи gcc говорим:
+
+sudo apt-get install gcc make flex bison libreadline-dev zlib1g-dev \
+  jade
+Если же вы предпочитаете clang:
+
+sudo apt-get install clang-3.6 make flex bison libreadline-dev \
+  zlib1g-dev jade
+sudo update-alternatives --install /usr/bin/cc cc \
+  /usr/bin/clang-3.6 100
+sudo update-alternatives --install /usr/bin/c++ c++ \
+  /usr/bin/clang++-3.6 100
+Если вы намерены собирать еще и документацию, также понадобятся:
+
+sudo apt-get install docbook docbook-dsssl docbook-xsl libxml2-utils \
+  openjade1.3 opensp xsltproc
+Смотрим все доступные флаги скрипта configure:
+
+./configure --help
+В документации можно найти более подробное их описание. Вот несколько наиболее интересных:
+
+--enable-debug      build with debugging symbols (-g)
+--enable-profiling  build with profiling enabled
+--enable-coverage   build with coverage testing instrumentation
+--enable-dtrace     build with DTrace support
+--enable-tap-tests  enable TAP tests (requires Perl and IPC::Run)
+--enable-cassert    enable assertion checks (for debugging)
+Примечание: Кое-какие подробности касательно флага --enable-coverage вы найдете в конце заметки Определение степени покрытия кода на C/C++ тестами. Подробности касательно DTrace приводятся в посте Использование DTrace на примере FreeBSD и Linux.
+
+Пример сборки с отладочными символами и ассертами (не для прода!):
+
+./configure --enable-tap-tests --enable-cassert --enable-debug
+make -j8
+Чтобы make не выводил длинный список всего, что он делает, используйте -s:
+
+make -s -j8
+Желающие адской оптимизации могут попробовать:
+
+CFLAGS="-O3 -march=native -flto -g" ./configure ... && make ... && ...
+Сборка вообще всего, включая документацию и расширения:
+
+make -j8 world
+Прогон регрессионных тестов:
+
+make check
+make check-world
+Если вдруг тесты почему-то свалились, здесь можно посмотреть логи:
+
+src/test/regress/log/postmaster.log
+src/test/regress/log/initdb.log
+Если что-то пошло не так, можно попробовать очистить все лишнее и начать заново, сказав git clean -dfx.
+
+Дополнение: Во FreeBSD сборка осуществляется аналогично, только вместо перечисленных выше пакетов вам понадобятся: git-lite bison perl5 gmake, а также при сборке вместо make следует использовать gmake.
+
+Установка
+Все просто:
+
+sudo make install
+sudo make install-world
+Важно! Скорее всего, здесь вы захотите воспользоваться checkinstall. Если же вы разрабатываете патч для PostgreSQL, куда удобнее будет использовать флаг конфигурации --prefix и один из этих скриптов (спасибо, @kelvich!).
+
+Если вы хотите установить только расширения, это можно сделать так:
+
+cd contrib
+make -j8
+sudo make install
+Сразу после установки не лишим будет прописать каталог /usr/local/pgsql/bin в переменную окружения $PATH.
+
+Создаем пользователя postgres:
+
+sudo adduser postgres
+Под пользователем postgres:
+
+su - postgres
+… подготавливаем каталог, в котором будут храниться все данные:
+
+cd
+mkdir data
+/usr/local/pgsql/bin/initdb -D /home/postgres/data
+Файлы postgresql.conf и pg_hba.conf вы найдете в /home/postgres/data.
+
+Наконец, запускаем PostgreSQL:
+
+/usr/local/pgsql/bin/postgres -D /home/postgres/data \
+  >/home/postgres/logfile 2>&1 &
+Видим, что порт 5432 прослушивается. В файле ./data/postmaster.pid первой строчкой записан PID master-процесса.
+
+Пример создания БД и подключения к ней:
+
+/usr/local/pgsql/bin/createdb my_database
+/usr/local/pgsql/bin/psql my_database
+Остановить СУБД можно, например, так:
+
+kill -9 `head -n 1 /home/postgres/data/postmaster.pid`
+Но лучше так:
+
+/usr/local/pgsql/bin/pg_ctl stop -D /home/postgres/data -s -m fast
+После установки можно еще заполнить базу какими-то данными и провести нагрузочное тестирование (не зря же мы кудрили с флагами оптимизации?):
+
+pgbench -j 8 -c 8 -f t.sql -T 30 my_database
+… или, как вариант:
+
+\timing on
+select * from my_table where id = 100;
+Стандартный бенчмарк — инициализация и сам тест:
+
+pgbench -i my_database
+pgbench -j 8 -c 8 -T 30 -P my_database
+Прогон обычных регрессионных тестов:
+
+make installcheck
+Удалить PostgreSQL можно, вернувшись в каталог с исходниками, и сказав:
+
+sudo make uninstall
+Все это, конечно, безумно интересно, но для полноценный настройки кое-чего все же не хватает.
+
+Автозапуск
+Парни из компании 2nd Quadrant написали отличный init.d скрипт для PostgreSQL. Он мне так понравился, что я даже сделал зеркало на GitHub.
+
+Копируем скрипт в /etc/init.d/postgresql и правим несколько первых строк:
+
+# Installation prefix
+prefix=/usr/local/pgsql/
+
+# Data directory
+PGDATA=/home/postgres/data
+
+# Who to run the postmaster as, usually "postgres".  (NOT "root")
+PGUSER=postgres
+
+# Where to keep a log file
+PGLOG=/home/postgres/logfile
+Затем говорим:
+
+sudo chmod u+x /etc/init.d/postgresql
+sudo update-rc.d postgresql defaults
+sudo service postgresql stop
+sudo service postgresql start
+Это уже почти здорово, но, к сожалению, пока что без ротации логов.
+
+Ротация логов
+Настраивается путем правки postgresql.conf примерно так:
+
+logging_collector = on
+log_directory = '/home/postgres/logs'
+log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+log_rotation_age = 1d
+log_rotation_size = 0
+
+# чтобы в логи писались таймстемпы
+log_line_prefix = '%m '
+Сам PostgreSQL не умеет сжимать и удалять старые логи, но эту проблему легко решить, прописав в /etc/crontab скрипт для ротации логов из заметки Как я выбирал скриптовый язык и остановился на Python.
+
+В качестве альтернативного варианта можно воспользоваться утилитой rotatelogs из пакета apache2-utils. В этом случае придется отредактировать строку что-то там $PGCTL start в init.d скрипте PostgreSQL. Результат должен получиться примерно таким:
+
+su ... "... 2>&1 | rotatelogs -f -c -n 10 /var/log/postgres 86400 &"
+Мне лично этот способ не нравится, так как мне хотелось бы, чтобы в именах лог-файлов были даты, а rotatelogs пишет просто номера. Кроме того, сжимать логи rotatelogs не умеет.
+
+Заключение
+Как видите, все довольно просто. Как уже отмечалось, сборка PostgreSQL для других версий Ubuntu или других *nix систем будет мало чем отличаться. Если же вдруг вас интересует сборка PostgreSQL под Windows, она описана здесь.
+
+А часто ли вы собираете софт из исходников ради большей производительности или же в силу иных причин?
+
+Дополнение: Также вас могут заинтересовать посты Потоковая репликация в PostgreSQL и пример фейловера и Учимся писать расширения на языке C для PostgreSQL.
+
+Метки: PostgreSQL, СУБД.

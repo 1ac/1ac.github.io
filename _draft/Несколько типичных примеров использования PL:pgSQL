@@ -1,0 +1,134 @@
+Несколько типичных примеров использования PL/pgSQL
+9 августа 2017
+
+PL/pgSQL — язык программирования, используемый для написания хранимых процедур и триггеров для PostgreSQL. Сказать по правде, впервые увидев код на PL/pgSQL, я испытал ужас. Хотя в коде и угадывались типичные конструкции процедурных языков программирования, выглядел он больно уж загадочно и вообще напоминал код на COBOL. Само собой разумеется, со временем это ощущение у меня прошло. Цель заметки — показать, что кода на PL/pgSQL не нужно бояться, и в целом язык довольно простой.
+
+Сразу начнем с примера кода, создающего 100 временных таблиц:
+
+DO $$
+DECLARE
+    i INTEGER;
+BEGIN
+    FOR i IN 1 .. 100
+    LOOP
+        RAISE NOTICE 'i = %', i;
+        EXECUTE ('create temp table temp_table_' || i || '(x int);');
+    END LOOP;
+END $$;
+Когда нужно просто выполнить код на PL/pgSQL, без объявления процедуры, этот код пишется в do-блоке, например:
+
+DO $$ BEGIN /* тут ваш код */ END $$;
+… или:
+
+DO $$ DECLARE /* переменные */ BEGIN /* код */ END $$;
+Все, что вы вводите в psql, должно заканчиваться точкой с запятой, поэтому она и стоит в конце. Два знака доллара нужны для того, чтобы пометить, где начинается, и где заканчивается код. В более общем случае можно использовать произвольную метку, начинающуюся и заканчивающуюся знаком доллара, лишь бы эта метка не встречалась в самом коде, например:
+
+DO $ololo$ BEGIN /* тут ваш код */ END $ololo$;
+Остальная часть приведенного ранее кода должна быть понятна любому программисту, поэтом перейдем к более сложному примеру:
+
+DO $$
+DECLARE
+    i INTEGER;
+    j INTEGER;
+    q TEXT;
+BEGIN
+    FOR i IN 1 .. 2800 LOOP
+        q = 'create temp table temp_table_' || i || '(';
+        FOR j IN 1 .. 400 LOOP
+            IF j <> 1 THEN
+                q = q || ',';
+            END IF;
+            q = q || 'attr_' || j || ' int';
+        END LOOP;
+        q = q || ');';
+        EXECUTE q;
+    END LOOP;
+END $$;
+Эта процедура создает очень много временных таблиц, каждая из которых имеет 400 столбцов. От предыдущего примера код отличается только использованием нескольких переменных, а также использованием условных операторов. Поэтому, думается, у вас не должно возникнуть сложностей с его пониманием.
+
+Теперь рассмотрим такой код:
+
+CREATE OR REPLACE FUNCTION gen_long_string(len INT) RETURNS TEXT AS $$
+DECLARE
+    res TEXT := 'abcdefghijklmnopqrstuvwxyz';
+BEGIN
+    WHILE LENGTH(res) <= len
+    LOOP
+        res := res || res;
+    END LOOP;
+
+    RETURN SUBSTRING(res, 1, len);
+END
+$$ LANGUAGE 'plpgsql';
+Здесь объявляется процедура, генерирующая строку заданной длины. Помимо объявления процедуры также демонстрируется использование цикла while. Заметьте, что язык процедуры нужно указывать явно, что и делается в последней строке кода. Это связано с тем, что триггеры и хранимые процедуры для PostgreSQL можно писать не только на PL/pgSQL, но и на других языках, в частности, на Perl, Python и JavaScript. Кстати, кавычки в имени языка использовать не обязательно.
+
+В следующем коде приводится пример конструкции select into, а также обработки исключений:
+
+CREATE OR REPLACE FUNCTION pgpro_edition_safe() RETURNS TEXT AS $$
+DECLARE
+    ver TEXT;
+BEGIN
+    SELECT pgpro_edition() INTO ver;
+    RETURN ver;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pgpro_edition() procedure doesn''t exist';
+    RETURN 'standard';
+END
+$$ LANGUAGE 'plpgsql';
+Если на сервере объявлена процедура с именем pgpro_edition, будет возвращен результат вызова этой процедуры. Если же ее нет, будет выведено предупреждение, и возвращен результат по-умолчанию.
+
+Работа с массивами осуществляется как-то так:
+
+/*
+Example:
+
+SELECT byte_array_to_string_array('{"\\x68656c6c6f","\\x776f726c64"}');
+ byte_array_to_string_array
+----------------------------
+ {hello,world}
+(1 row)
+*/
+CREATE OR REPLACE FUNCTION byte_array_to_string_array(bytes bytea[])
+RETURNS TEXT[] AS $$
+DECLARE
+    strings TEXT[];
+BEGIN
+    -- IF array_length(bytes, 1) IS NULL THEN
+    IF bytes = '{}' THEN
+        RETURN '{}';
+    END IF;
+
+    FOR i IN array_lower(bytes, 1) .. array_upper(bytes, 1) LOOP
+        strings[i] := convert_from(bytes[i], 'utf-8');
+    END LOOP;
+
+    RETURN strings;
+END
+$$ LANGUAGE 'plpgsql' IMMUTABLE;
+Здесь массив элементов с типом bytea превращается в массив строк. Заметьте, как выполняется проверка на пустой массив. По неизвестным мне причинам для пустого массива процедура array_length вместо нуля возвращает null, отсюда и такой код.
+
+Наконец, рассмотрим последний на сегодня пример:
+
+DO $$
+DECLARE
+    r RECORD;
+    cnt INT;
+BEGIN
+    FOR r IN
+        SELECT table_name FROM information_schema.TABLES
+        WHERE table_schema = 'pg_catalog' AND table_type != 'VIEW'
+        ORDER BY table_name DESC
+    LOOP
+        EXECUTE 'select count(*) cnt FROM ' || r.table_name INTO cnt;
+        RAISE NOTICE '% %', r.table_name, cnt;
+    END LOOP;
+END $$;
+Здесь выводятся все таблицы каталога PostgreSQL, а также количество записей в них. Очень удобный кусок кода, позволяющий определить, к каким изменениям в каталоге приводят те или иные действия. Код демонстрирует работу с типом record, а также итерацию по строкам, являющихся результатом select-запроса.
+
+Как видите, все не так уж и сложно. Увы, в рамках одной заметки не представляется возможным рассказать про весь PL/pgSQL. Если вам хотелось бы изучить этот язык поглубже, могу порекомендовать официальную документацию PostgreSQL, а также книгу PostgreSQL Server Programming. Также не лишено смысла почитывать код расширений для PostgreSQL, ну хотя бы моих же ZSON и pg_protobuf.
+
+А пишите ли вы на PL/pgSQL, и каковы ваши впечатления от этого языка?
+
+Дополнение: Пример использования триггеров в PostgreSQL
+
+Метки: PostgreSQL, СУБД.

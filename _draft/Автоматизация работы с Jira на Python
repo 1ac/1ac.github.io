@@ -1,0 +1,84 @@
+Автоматизация работы с Jira на Python
+6 июля 2020
+
+Недавно по работе я занимался проработкой небольшой tech story. Сторя распалась на несколько задач, связанных отношением «задача А блокирует задачу Б». Стало интересно, как это будет смотреться на диаграмме Ганта, или хотя бы в виде простого графа. Но оказалось, что из коробки Jira такой возможности не предоставляет. Опрос знакомых на предмет готового решения результатов не дал. Тогда было решено написать небольшой скрипт на Python.
+
+Как обычно, зависимости были положены в virtualenv. Зависимостей у скрипта не много:
+
+pip3 install jira PyYAML
+Пакет jira нужен непосредственно для хождения в Jira API. PyYAML используется для парсинга файла конфигурации. Вот его пример:
+
+jira:
+  url: https://company.atlassian.net
+  login: user.name@example.com
+  password: PasswordOrAPIKeyHere
+API Key можно получить в Jira, зайдя в свой профиль.
+
+А вот и код скрипта:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+from jira import JIRA
+import argparse
+import yaml
+import os
+
+def load_config(fname):
+    with open(fname, 'r') as stream:
+        return yaml.load(stream, Loader=yaml.FullLoader)
+
+parser = argparse.ArgumentParser(
+    description='Print Graphviz source of dependency graph'+
+        ' for a given tech story'
+    )
+parser.add_argument(
+    '-c', '--config', metavar='F', type=str,
+    default=os.environ['HOME']+"/.jira.yaml",
+    help='config file, by default: ~/.jira.yaml')
+parser.add_argument(
+    '-s', '--story', metavar='S', type=str, required=True,
+    help='story key')
+args = parser.parse_args()
+
+conf = load_config(args.config)
+
+opts = {'server': conf['jira']['url'] }
+auth = (conf['jira']['login'], conf['jira']['password'])
+jira = JIRA(options=opts, basic_auth=auth)
+story = jira.issue(args.story)
+
+print("digraph Gantt {")
+print("node [shape=record style=filled fillcolor=yellow "+
+    "fontname=Arial];")
+for link in story.fields.issuelinks:
+    if link.type.name != 'Contains':
+        continue
+    issue = jira.issue(link.outwardIssue.key)
+    blocks = []
+    print(""""{}" [label="{}: {}"]""".format(
+        issue.key, issue.key, issue.fields.summary))
+    for x in issue.fields.issuelinks:
+        if x.type.name != 'Blocks':
+            continue
+        if 'outwardIssue' not in x.raw.keys():
+            continue
+        blocks += [ x.outwardIssue.key ]
+
+    for b in blocks:
+        print('"{}" -> "{}"'.format(issue.key, b))
+print("}")
+Поначалу я хотел рисовать диаграмму Ганта при помощи PlantUML. Оказалось, что PlantUML рисует скверные диаграммы Ганта. В итоге был использован Graphviz.
+
+Пример использования скрипта:
+
+./print-deps.py -s 'PLAT-123' > deps.gv
+dot deps.gv -Tpng -o deps.png
+open deps.png
+А так выглядит результат (кликабельно):
+
+Граф зависимостей задач в Jira, построенный с помощью Python и Graphviz
+
+Само собой разумеется, с тем же подходом можно не только строить графы зависимостей. Например, можно взять Matplotlib и построить графики открытых и закрытых багов за спринт. Кроме того, Jira API позволяет создавать и изменять задачи, оставлять комментарии к ним, и так далее.
+
+Метки: Python, Разработка.

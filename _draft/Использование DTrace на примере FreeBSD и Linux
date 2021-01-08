@@ -1,0 +1,227 @@
+Использование DTrace на примере FreeBSD и Linux
+8 августа 2016
+
+DTrace — это такая штука, присутствующая во FreeBSD, NetBSD, MacOS, Solaris и Linux. DTrace предназначен для динамической трассировки ядра системы и приложений в реальном времени, главным образом с целью их профайлинга и отладки. Сегодня мы попробуем поработать с DTrace во FreeBSD. Кроме того, мы установим DTrace и в Ubuntu, хотя по поводу стабильности такой конфигурации и остаются вопросы.
+
+Дополнение: Спустя пару лет после публикации этого поста поддержка DTrace была добавлена в Windows.
+
+Чем так примечателен именно DTrace?
+DTrace является не единственным решением в своем роде. Из достойных аналогов можно назвать, например, SystemTap. По сравнению с аналогами, DTrace обладает следующими примечательными свойствами:
+
+Во многих системах DTrace есть из коробки и просто работает, не нужно ничего устанавливать;
+DTrace не тормозит по 10 секунд перед запуском трассировки;
+Технология появилась давно и является вполне зрелой, ее не страшно использовать прямо на проде;
+Имеется подробнейшая документация;
+В первом приближении функционал выглядит более удобно и богато, чем у аналогов. Стабильные и документированные пробы есть прямо на все события в системе — в стиле TCP-соединение установлено, TCP-соединение закрыто, и такого рода вещи. А не так, что нужно знать, за какой процедурой в коде этой версии ядра нужно следить;
+Приведенные далее примеры были проверены на FreeBSD версии 10.3, но по идее должны без изменений работать и на других версиях системы.
+
+Примеры трассировки ядра системы
+Как уже отмечалось, установка не требуется, так как DTrace является частью ядра FreeBSD начиная с версии 9.2 и по умолчанию включен в GENERIC. Если вы используете старое ядро, или новое, но собранное с кастомными параметрами, здесь описывается, как включить поддержку DTrace. Описание процесса сборки ядра FreeBSD вы найдете в заметке Собираем ядро и мир FreeBSD из исходников.
+
+Загружаем все необходимые модули:
+
+sudo kldload dtraceall
+Смотрим список доступных пробов (probe, еще можно перевести как «зонд» или даже «щуп»):
+
+sudo dtrace -l | less
+sudo dtrace -l | grep entry | wc -l
+Как видите, пробов существует великое множество. У меня в системе их доступно более 28 тысяч!
+
+В качестве примера попробуем логировать создание всех новых процессов:
+
+sudo dtrace -n 'proc:::exec-success { trace(curpsinfo->pr_psargs); }'
+Пример вывода:
+
+dtrace: description 'proc:::exec-success ' matched 1 probe
+dtrace: buffer size lowered to 2m
+CPU     ID            FUNCTION:NAME
+  0  51735        none:exec-success   /usr/sbin/sshd -R                
+  0  51735        none:exec-success   -csh                            
+  0  51735        none:exec-success   /usr/games/fortune freebsd-tips
+^C
+Другой пример — трейсим все, что как-то связано с TCP:
+
+sudo dtrace -n 'tcp::: { @[probename] = count(); }'
+Вывод будет выглядеть как-то так:
+
+dtrace: description 'tcp::: ' matched 8 probes
+dtrace: buffer size lowered to 2m
+dtrace: aggregation size lowered to 2m
+^C
+
+  connect-established                                               1
+  connect-request                                                   1
+  state-change                                                      5
+  send                                                             62
+  receive                                                         107
+Еще вас может заинтересовать утилита dtruss:
+
+sudo dtruss 'ls -la'
+Эта утилита трейсит используемое программой системные вызовы. То есть, делает то же самое, что и truss (или strace в Linux), только через DTrace.
+
+Если нужно потрейсить определенные системные вызовы, совершаемые конкретным процессом, можно сделать это при помощи такого скрипта:
+
+#!/usr/sbin/dtrace -s
+
+syscall:freebsd:poll:entry /execname == "postgres"/
+{
+  printf("fds = %p, nfds = %d, timeout = %d", arg0, arg1, arg2);
+}
+
+syscall:freebsd:poll:return /execname == "postgres"/
+{
+  printf("result = %p", arg1)
+}
+Как видите, DTrace позволяет нам залезть своими грязными лапками практически в любое место системы, будь то системные вызовы, сетевой стек, или что-то еще (см полный список доступных пробов). Довольно круто, не так ли?
+
+Пример трассировки приложения
+DTrace позволяет трейсить не только ядро операционной системы, но и пользовательские приложения. В качестве примера приложения, снабженного пробами для DTrace, рассмотрим мой любимый PostgreSQL. Чтобы активировать пробы, придется собрать PostgreSQL из исходников с соответствующими флагами. Вопрос сборки PostgreSQL подробнейшим образом рассмотрен в заметке PostgreSQL: сборка из исходников и настройка под Linux. Далее предполагается, что процесс этот вам прекрасно знаком.
+
+Нам понадобится пакет libelf:
+
+sudo pkg install libelf
+Непосредственно сборка PostgreSQL (я лично проверял на версии 9.6, но по идее должно работать и на других):
+
+mkdir ~/postgresql-install
+
+CFLAGS="-O0 -g" LDFLAGS="-lelf" \
+  ./configure --enable-cassert --enable-debug --enable-dtrace \
+  --prefix=/home/afiskon/postgresql-install && \
+  echo '#undef HAVE_SETPROCTITLE' >> ./src/include/pg_config.h && \
+  gmake clean && gmake -j2 -s
+Для быстрой локальной установки и конфигурации PostgreSQL можно воспользоваться скриптами из этого репозитория на GitHub.
+
+При компиляции сыпется довольно много варнингов. Насколько я смог выяснить, так и должно быть, этому багу уже лет десять. Еще я обнаружил, что Clang версий 3.7 и 3.8 почему-то не могут скомпилировать проект с такими флагами, выдавая ошибку undefined reference to `bort'. Clang версии 3.4, идущий в системе по умолчанию, собирает все без проблем. Разработчики Clang говорят, что проблема не на их стороне.
+
+Список пробов, доступных в PostgreSQL, можно подсмотреть в исходниках:
+
+less ./src/backend/utils/probes.d
+less ./src/backend/utils/probes.h
+В общем случае список пробов для конкретного процесса можно посмотреть так:
+
+sudo dtrace -l | grep 79470
+… или, если нам известны названия пробов:
+
+sudo dtrace -l -m postgres
+sudo dtrace -l -P postgresql79470
+Пример трассировки локов в PostgreSQL:
+
+sudo dtrace -n ':postgres:LWLockAcquire: { printf("name = %s, id = %d'\
+', mode = %d", copyinstr(arg0), arg1, arg2) } :postgres:LWLockRelease'\
+': { printf("name = %s", copyinstr(arg0)) }' -p 79670
+В общем и целом, принцип тот же, что и в случае с ядром.
+
+Профилирование с использованием DTrace
+Как выяснилось, DTrace также легко справляется с профилированием кода:
+
+sudo dtrace \
+  -n 'profile-4999 /execname == "postgres"/ { @[ustack(1)] = count() }'
+
+sudo dtrace \
+  -n 'profile-4999 /pid == 1234/ { @[ustack()] = count() }' \
+  -o out.dtrace
+Идея заключается в том, чтобы снимать стектрейсы приложения с заданной частотой, в данном случае 4999 Гц, а затем смотреть, какие стектрейсы были сняты чаще других. Все гениальное — просто.
+
+Если генерируемый вывод кажется вам не очень читаемым, скажите:
+
+git clone https://github.com/brendangregg/FlameGraph
+perl ./FlameGraph/stackcollapse.pl out.dtrace > out_folded.dtrace
+perl ./FlameGraph/flamegraph.pl ./out_folded.dtrace > fg.svg
+В результате по собранным стектрейсам будут построены красивые флеймграфы, ничем не уступающие тем, что нам доводилось строить при помощи perf в заметке Профилирование кода на C/C++ в Linux и FreeBSD.
+
+Использование DTraceToolkit
+С моей стороны было бы большим упущением не рассказать про DTraceToolkit:
+
+sudo pkg install dtrace-toolkit
+Это такая коллекция из нескольких сотен полезных скриптов на базе DTrace:
+
+pkg info -l dtrace-toolkit | egrep '\.d$'
+Рассмотрим некоторые из них.
+
+Скрипт hotkernel позволяет определить, в каких процедурах ядро проводит больше всего времени:
+
+$ sudo hotkernel
+
+FUNCTION                                                COUNT   PCNT
+zfs.ko`arc_read_done                                        1   0.0%
+kernel`hpet_get_timecount                                   1   0.0%
+kernel`in_lltable_lookup                                    1   0.0%
+kernel`ata_end_transaction                                  1   0.0%
+zfs.ko`zio_buf_free                                         1   0.0%
+kernel`DELAY                                                1   0.0%
+kernel`ata_pci_dmastart                                     1   0.0%
+zfs.ko`txg_all_lists_empty                                  1   0.0%
+kernel`ata_generic_command                                  2   0.1%
+kernel`ata_tf_write                                         2   0.1%
+kernel`spinlock_exit                                        2   0.1%
+dtrace.ko`dtrace_dynvar_clean                               3   0.1%
+kernel`ata_pci_dmastop                                      4   0.1%
+kernel`acpi_cpu_c1                                       2984  99.3%
+Скрипт opensnoop позволяет следить, кто какие файлы открывает:
+
+$ sudo opensnoop
+
+  UID    PID COMM          FD PATH                
+ 1001   9147 id             3 /etc/nsswitch.conf  
+ 1001   9147 id             3 /etc/pwd.db          
+ 1001   9147 id             3 /etc/group          
+ 1001   9147 id             3 /etc/group          
+ 1001   9147 id             3 /etc/group
+Скрипт procsystime позволяет определить, сколько времени процессы проводят в каких системных вызовах:
+
+$ sudo procsystime
+
+Elapsed Times for all processes,
+
+         SYSCALL          TIME (ns)
+       sigaction               2827
+            mmap               3400
+       sigreturn               4137
+          getpid               5032
+        __sysctl               9839
+         madvise              16798
+           ioctl              24210
+     sigprocmask              56221
+            read             115654
+           write             658697
+          select          998609958
+        _umtx_op          998813579
+Скрипт shellsnoop следит за тем, кто какие команды выполняет в шелле (по ширине вывод обрезан мной):
+
+$ sudo shellsnoop
+
+  PID  PPID      CMD DIR  TEXT
+ 9175   799       id   W  uid=1001(afiskon) gid=1001(afiskon) groups...
+ 9176   799      pwd   W  /home/afiskon
+ 9177   799    uname   W  FreeBSD  10.3-RELEASE-p4 FreeBSD 10.3-RELE...
+Детально рассмотреть все скрипты со всеми доступными флагами, увы, не представляется возможным. На эту тему можно вести целый отдельный блог!
+
+Установка DTrace в Ubuntu Linux
+Существует проект по портированию DTrace на ядро Linux под названием dtrace4linux.
+
+Устанавливается dtrace4linux таким образом (я тестил на Ubuntu 16.04):
+
+git clone https://github.com/dtrace4linux/linux.git dtrace
+sudo ./tools/get-deps.pl
+make all
+sudo make install
+sudo make load
+Проверяем:
+
+sudo dtrace -n 'tcp::: { @[probename] = count(); }'
+sudo dtrace -n 'syscall:::entry { @[probefunc] = count(); }'
+Вроде, работает. Впрочем, если судить по ишьюсам на GitHub, использовать dtrace4linux следует с некоторой осторожностью.
+
+Заключение
+Надеюсь, мне удалось убедить вас в том, что DTrace — крутейшая штука, заслуживающая самого пристального внимания с вашей стороны. В качестве источников дополнительной информации можно рекомендовать:
+
+Официальный блог и мейлинг лист проекта;
+Список рассылки freebsd-dtrace@freebsd.org;
+В хэндбуке FreeBSD есть глава, посвященная DTrace, плюс туториал и однострочники можно найти на wiki.freebsd.org;
+Из книг можно посоветовать Systems Performance: Enterprise and the Cloud и DTrace Dynamic Tracing in Oracle Solaris, Mac OS X and FreeBSD;
+Исходники DTrace из Oracle Linux, имеющего мало общего с проектом dtrace4linux;
+А пользуетесь ли вы DTrace и если да, то какие его возможности находите наиболее ценными?
+
+Дополнение: См также заметку Трассировка и профайлинг в Linux с помощью bcc/eBPF.
+
+Метки: FreeBSD, Linux, Оптимизация, Отладка.

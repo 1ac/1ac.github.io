@@ -1,0 +1,181 @@
+Stolon: создаем кластер PostgreSQL с автофейловером
+26 октября 2016
+
+Для PostgreSQL существует множество так называемых high availability решений, наиболее известными из которых, пожалуй, являются repmgr и patroni. Согласно некоторым отзывам, они не слишком удобны в использовании и иногда могут терять данные. Поэтому сегодня мне хотелось бы рассказать о более новом решении под названием Stolon. Разработка Stolon ведется с сентября 2015-го года. Он написан на языке Go, активно паразитирует на Consul или etcd (на выбор пользователя) и из коробки имеет интеграцию с Kubernetes. Но самое главное — он сравнительно прост в использовании и выглядит очень правильно с точки зрения дизайна системы. При правильном использовании Stolon переживает нетсплиты и не теряет данные.
+
+Примечание: Далее предполагается, что читатель знаком с тем, как работает потоковая репликация в PostgreSQL, как происходит переключение на нового мастера, и так далее. Строго говоря, эти знания не являются обязательными для использования Stolon, но они весьма желательны!
+
+Настройка Stolon-кластера
+Описанные ниже шаги производились мной на трех Linux-машинах в одной локальной сети с установленными на них PostgreSQL 9.5.4, компилятором языка Go 1.7.1, а также объединенным в кластер Consul’ом версии 0.7.0. Процессы Stolon’а далее будут запускаться прямо из консоли. Настройка их автозапуска не рассматривается. Вы можете настроить его при помощи systemd или, например, runit, как мы это делали в заметке CouchDB 2.0: краткий обзор и мои первые впечатления.
+
+Итак, на всех трех машинах собираем Stolon из исходников:
+
+cd ~/go/src # или где у вас $GOPATH/src
+mkdir -p github.com/sorintlab
+cd github.com/sorintlab
+git clone https://github.com/sorintlab/stolon.git
+cd stolon
+git checkout v0.3.0
+./build
+Запускаем sentinel:
+
+./bin/stolon-sentinel --cluster-name mycluster --store-backend consul \
+  --listen-address 10.0.3.7
+Задача sentinel — следить за состоянием кластера и в случае необходимости производить его реконфигурацию. Одновременно можно запустить сколько угодно sentinel, но из них только один будет выбран, как лидер. Остальные нужны для того, чтобы заменить лидера, если с ним что-то случится. В общем случае, чтобы нормально переживать нетсплиты, следует запускать по одному sentinel на каждой машине с PostgreSQL.
+
+В логах вы увидите что-то вроде:
+
+sentinel: failed to update clusterView: cannot choose initial master,
+  no keepers registered
+Это нормально, так как мы еще не запустили ни одного инстанса PostgreSQL. Инстансы в Stolon запускаются через специальную программу-агент под названием keeper. Чтобы запустить первый keeper, создадим файлы, содержащие пароль пользователя postgres и пароль, используемый при репликации:
+
+echo -n 'supasswd123' > ~/.pgsupasswd
+echo -n 'replpasswd123' > ~/.pgreplpasswd
+Теперь запускаем keeper:
+
+./bin/stolon-keeper --data-dir ./postgres1 --id postgres1 \
+  --cluster-name mycluster --pg-su-passwordfile ~/.pgsupasswd \
+  --pg-repl-username repluser --pg-repl-passwordfile ~/.pgreplpasswd \
+  --store-backend consul --pg-listen-address 10.0.3.7 \
+  --listen-address 10.0.3.7
+В логе sentinel’я увидим:
+
+sentinel: initializing cluster with master: "postgres1"
+sentinel: deleting proxyconf
+sentinel: updating proxyconf to 10.0.3.7:5432
+Сейчас самое время поправить postgresql.conf — увеличить размер shared buffers, и изменить прочие настройки, а затем перезапустить keeper. Stolon поддерживает как синхронную, так и асинхронную репликацию. По умолчанию используется последняя. Настраивать синхронную репликацию сейчас не требуется. Это можно сделать через Stolon и далее будет показано, как.
+
+Следующим шагом запускаем proxy:
+
+./bin/stolon-proxy --cluster-name mycluster --listen-address 10.0.3.7 \
+  --port 25432 --store-backend consul
+Proxy отвечает за пробрасывание TCP-соединения к текущему мастеру и разрыв этого соединения в случае смены мастера. На момент написания этих строк отправка в реплики запросов только на чтение не поддерживается. В связи с этим на практике вы, возможно, решитесь обойтись и без proxy (далее будет показано, как), но для полноты картины давайте все-таки рассмотрим его использование.
+
+Сначала подключаемся к PostgreSQL в обход proxy:
+
+psql --host localhost --port 5432 -d postgres
+Создаем пользователя и базу данных:
+
+CREATE DATABASE test;
+CREATE USER test WITH PASSWORD 'qwerty';
+GRANT ALL PRIVILEGES ON DATABASE test TO test;
+Теперь проверяем подключение через proxy:
+
+psql --host 10.0.3.7 --port 25432 --user test
+Пытаемся выполнить какие-то запросы:
+
+test=> create table test (key int, str text);
+CREATE TABLE
+test=> insert into test values (111, 'aaa'), (222, 'bbb');
+INSERT 0 2
+test=> select * from test;
+ key | str
+-----+-----
+ 111 | aaa
+ 222 | bbb
+Вроде, работает!
+
+Теперь можно запустить keeper’ы на остальных машинах. Нужно указать другие параметры --id, --pg-listen-address и --listen-address. Пароли следует использовать те же, что и ранее. В логах новых keeper’ов получим что-то вроде:
+
+...
+keeper: our cluster requested state is standby following "postgres1"
+keeper: syncing from followed instance "postgres1"
+postgresql: Running pg_basebackup
+keeper: sync from followed instance "postgres1" successfully finished
+postgresql: Starting database
+keeper: current pg state: standby
+Как уже отмечалось, по умолчанию Stolon использует асинхронную репликацию. Переключиться на синхронную можно прямо во время работы кластера таким образом:
+
+./bin/stolonctl --store-backend consul --cluster-name=mycluster \
+  config patch '{ "synchronous_replication" : true }'
+По аналогии можно переключиться и обратно на асинхронную. В postgresql.conf синхронная репликация выглядит так:
+
+# на инстансе postgres1
+synchronous_standby_names = 'postgres2,postgres3'
+При использовании кластера из трех инстансов PostgreSQL это обеспечивает переживание нетсплитов, так как мастер с одной любой синхронной репликой из списка образуют кворум. Начиная с PostgreSQL 9.6 можно указать точное количество синхронных реплик, но на момент написания этих сток Stolon не использует эту возможность. Это означает, что Stolon может потерять данные, если в кластере больше трех нод и при нетсплите синхронные реплики оказались среди меньшинства.
+
+Проверяем работу автофейловера
+Если теперь уронить мастер, в логах sentinel увидим:
+
+sentinel: master is failed
+sentinel: trying to find a standby to replace failed master
+sentinel: electing new master: "postgres2"
+В клиенте, использующем proxy, при этом оборвется коннект:
+
+test=> select * from test;
+FATAL:  terminating connection due to administrator command
+server closed the connection unexpectedly
+    This probably means the server terminated abnormally
+    before or while processing the request.
+The connection to the server was lost. Attempting reset: Succeeded.
+test=> select * from test;
+ key | str
+-----+-----
+ 111 | aaa
+ 222 | bbb
+(2 rows)
+Теперь восстановим postgres1 и сэмулируем нетсплит при помощи iptables на postgres2:
+
+sudo iptables -A INPUT  -s 10.0.3.7 -j DROP
+sudo iptables -A OUTPUT -d 10.0.3.7 -j DROP
+sudo iptables -A INPUT  -s 10.0.3.9 -j DROP
+sudo iptables -A OUTPUT -d 10.0.3.9 -j DROP
+В логах sentinel увидим:
+
+sentinel: master is failed
+sentinel: trying to find a standby to replace failed master
+sentinel: electing new master: "postgres1"
+sentinel: deleting proxyconf
+sentinel: updating proxyconf to 10.0.3.7:5432
+Починим нетсплит и убедимся, что postgres2 вернулся в качестве реплики:
+
+sudo iptables -F
+Как видите, Stolon переживает падение машин и нетсплиты. Впрочем, лучше не верьте мне на слово, и проведите собственные, более сложные тесты!
+
+Получение информации о кластере из Consul
+Как уже отмечалось, на данный момент proxy не умеет пробасывать запросы только на чтение в реплики. Но ничто не мешает нам найти реплики через Consul самостоятельно и подключиться к ним из приложения напрямую.
+
+Stolon создает не так уж много ключей:
+
+curl -s 'localhost:8500/v1/kv/?recurse' | jq -r '.[]["Key"]'
+Пример ответа:
+
+stolon/cluster/mycluster/clusterdata
+stolon/cluster/mycluster/keepers/discovery/postgres1
+stolon/cluster/mycluster/keepers/discovery/postgres2
+stolon/cluster/mycluster/keepers/discovery/postgres3
+stolon/cluster/mycluster/proxies/info/c96d4e71
+stolon/cluster/mycluster/proxies/info/ff5fc0e9
+stolon/cluster/mycluster/sentinel-leader
+stolon/cluster/mycluster/sentinels/info/68e6a3bb
+Здесь самое интересное — это ключ clusterdata, содержащий всю информацию о кластере:
+
+curl -s 'localhost:8500/v1/kv/stolon/cluster/mycluster/clusterdata' \
+  | jq -r '.[0]["Value"]' | base64 -d | jq
+Ответ довольно размашистый, вы можете ознакомиться с ним здесь. Как видите, все ноды, адреса, порты, роли — все как на ладони!
+
+Напомню, что используя ModifyIndex ключа:
+
+curl 'localhost:8500/v1/kv/stolon/cluster/mycluster/clusterdata' \
+  | jq -r '.[0]["ModifyIndex"]'
+… можно подписаться на его обновления:
+
+curl -s 'localhost:8500/v1/kv/stolon/cluster/mycluster/clusterdata'\
+'?wait=0s&index=14379'
+Кстати, ключ меняется довольно часто, раз в несколько секунд. Само собой разумеется, эту информацию можно использовать не только для поиска реплик, но и для мониторинга или, например, какой-то визуализации работы кластера.
+
+Заключение
+Основные моменты при использовании Stolon:
+
+Consul или etcd используются исключительно как KV-хранилища. Например, возможность Consul по поиску сервисов через DNS, и прочие специфичные вещи, не используются;
+Если вы хотите создать несколько кластеров Stolon, для нормального переживания нетсплитов и других граничных случаев стоит создать для каждого кластера отдельный кластер Consul’а;
+При промоутинге реплики до мастера Stolon всегда пытается выбрать наилучшую (наименее отставшую) реплику среди доступных. Если в вашем приложении потеря данных недопустима, используйте синхронную репликацию и кластер ровно из трех нод;
+На данный момент запросы через proxy идут только в мастер. Это обещают исправить в версии 0.4.0, а пока что можно обойтись описанным выше воркэраундом;
+Многие вопросы, например, использование Stolon вместе с etcd и интеграция с Kubernetes, остались за кадром, но в первом приближении использование Stolon выглядит как-то так. На мой взгляд, Stolon очень многообещающий проект. И работает он именно так, как я сам писал бы автофейловер для PostgreSQL. Только все уже написано.
+
+А используете ли вы Stolon, или какое-то другое подобное решение, и если да, то каковы ваши впечатления от него?
+
+Дополнение: Вас также может заинтересовать пост Поднимаем кластер CockroachDB из трех нод.
+
+Метки: PostgreSQL, СУБД.
+

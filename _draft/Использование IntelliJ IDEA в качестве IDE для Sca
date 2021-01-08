@@ -1,0 +1,157 @@
+Использование IntelliJ IDEA в качестве IDE для Scala, а также других функциональных языков программирования
+23 июня 2014
+
+IntelliJ IDEA позиционируется, как IDE для программирования на множестве различных языков, не только Java. В частности, есть совершенно замечательный плагин для Erlang, которым я с огромным удовольствием пользуюсь уже около месяца. Еще я слышал, что есть плагин для Haskell, но пока что его не пробовал. Так вот, если с Erlang, к примеру, все довольно просто — открываешь проект и фигачишь, то со Scala есть пара нюансов, о которых мне и хотелось бы поведать.
+
+Дополнение: Вскоре после написания этой заметки я все-таки нашел и попробовал плагин для Haskell. Поддержка этого языка оказалось самой базовой. Имеется подсветка синтаксиса, в том числе внутри cabal-файлов, работают простые вещи вроде перехода в пределах текущего файла к определению функции по нажатию F4, есть базовый автокомплит (Alt + /). До уровня полноценной IDE определенно не дотягивает. С другой стороны, как минимум, этот плагин не хуже, чем Vim. Еще в настоящее время активно разрабатывается альтернативный плагин HaskForce, но согласно описанию «this plugin is in its early stages and is not ready for use», поэтому я его даже не смотрел.
+
+Как и все плагины, плагин для Scala устанавливается через File → Settings → Plugins → Browse repositories. Находим плагин с именем «Scala», устанавливаем, перезапускаем IDE. Там же можно поставить плагин для Erlang и других языков.
+
+Теперь создадим новый проект. IntelliJ IDEA умеет работать как с Maven, так и SBT (как я понимаю, есть еще такая штука Gradle, которая также поддерживается). Коллеги-скалолазы пользуются Maven, в связи с чем он мне больше интересен. Поэтому далее речь пойдет о нем.
+
+Если коротко, то после раскуривания StackOverflow и различных туториалов, у меня получился такой pom.xml:
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>me.eax.examples</groupId>
+  <artifactId>screenshot-maker</artifactId>
+  <version>1.0-SNAPSHOT</version>
+
+  <properties>
+    <project.build.sourceEncoding>
+      UTF-8
+    </project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.scala-lang</groupId>
+      <artifactId>scala-library</artifactId>
+      <version>2.11.1</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.scala-tools</groupId>
+        <artifactId>maven-scala-plugin</artifactId>
+        <version>2.15.2</version>
+        <executions>
+          <execution>
+            <goals>
+              <goal>compile</goal>
+              <goal>testCompile</goal>
+            </goals>
+            <configuration>
+              <args>
+                <arg>-deprecation</arg>
+              </args>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.1</version>
+        <configuration>
+          <source>1.7</source>
+          <target>1.7</target>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifest>
+              <mainClass>
+                me.eax.examples.screenshot_maker.ScreenshotMaker
+              </mainClass>
+            </manifest>
+          </archive>
+          <descriptorRefs>
+            <descriptorRef>jar-with-dependencies</descriptorRef>
+          </descriptorRefs>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+После сохранения изменений в pom.xml IntelliJ IDEA осознает, что в вашем проекте используется Scala, а также подтянет все нужные плагины для Maven. Алсо в проекте не повредит создать файл .gitignore. Воспользуемся тем же файлом, что приводился в заметке Функциональщик ботает Java — работа со сторонними библиотеками и хождение в РСУБД через JDBC:
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# Intellij
+.idea/
+*.iml
+*.iws
+
+# Mac
+.DS_Store
+
+# Maven
+log/
+target/
+Далее открываем окно Project и создаем каталог src/main/scala. Жмакаем по каталогу правой кнопкой мыши и говорим Mark Directory As → Sources Root. После этого каталог должен сменить цвет с оранжевого на синий, а в его контекстном меню станут доступны пункты для создания пакетов и классов (кстати, отчего бы сразу не создать парочку?). Аналогичным образом создаем каталог src/test/scala, только помечаем его как Test Sources Root. Если вы не планируете использовать в проекте Java, то каталоги src/*/java можно удалить. В результате должна получить примерно такая картинка:
+
+Использование IntelliJ IDEA в качестве IDE для Scala
+
+Как вы уже догадались, чтобы не писать банальный «Hello World», я решил написать простенькую программку для создания скриншотов.
+
+Исходный код:
+
+package me.eax.examples.screenshot_maker
+
+import java.awt._
+import java.io._
+import javax.imageio._
+
+object ScreenshotMaker extends App {
+  def executableName : String = {
+    System.getProperty("sun.java.command")
+  }
+
+  def makeScreenshot(fileName: String) {
+    val toolkit = Toolkit.getDefaultToolkit
+    val rect = new Rectangle(toolkit.getScreenSize)
+    val capture = new Robot().createScreenCapture(rect)
+    ImageIO.write(capture, "png", new File(fileName))
+  }
+
+  if(args.isEmpty) {
+    println(s"Usage: ${executableName} screenshot.png")
+  } else {
+    makeScreenshot(args(0))
+  }
+}
+Между прочим, приведенный выше скриншот был сделан при помощи этой самой программы, а затем отредактирован в Gimp.
+
+Сочетание Shift + F10 не будет работать, пока вы не объявите класс, который «extends App». Что интересно, в IntelliJ IDEA есть поддержка REPL. В частности, Shift + F10 его и открывает. Также в REPL можно попасть нажатием Ctr + Shift + D или выделив кусок кода и нажав Ctr + Shift + X. В последнем случае выделенный код будет выполнен в REPL. Само собой разумеется, в REPL можно выполнять любой код, при этом работает автокомплит, просмотр документации (Ctr + Q), подсказка по аргументам (Ctr + P) и есть история. Это офигительно удобно! Запускается набранный в REPL код сочетанием Ctr + Enter.
+
+Кстати, в Erlang’овом плагине вроде как тоже есть поддержка REPL, но там все как-то сложно. Я пока не осилил и работаю с REPL по старинке, из консоли.
+
+Собрать standalone jar, как мы это уже когда-то выясняли, можно командой:
+
+mvn clean compile assembly:single
+Пара небольших советов.
+
+Hint номер один. В IntelliJ IDEA можно создавать шаблоны проектов — Tools → Save Project as Template. Hint номер два. Несмотря на то, что IntelliJ IDEA умеет интегрироваться с Git, а также другими системами контроля версий, в реальных проектах с кучей веток и зависимостей намного удобнее работать с Git в консоли (Alt + F12). И это может относится не только к Git. При программировании на Erlang я пишу код локально, затем заливаю его на dev-сервер и собираю уже там — все это из консоли IntelliJ.
+
+Общие впечатления от плагинов как для Scala, так и для Erlang, исключительно положительные. Сочетания клавиш, всякие там рефакторинги (включая краевые случаи вроде инлайнинга при использовании интерполяции строк), переходы к определению методов и так далее — в первом приближении все работает. Иногда, довольно редко, всплывают небольшие баги, но до сих пор не было ни одного критичного. И в любом случае, даже с этими багами писать код в IntelliJ IDEA оказалось намного удобнее, чем в Vim. Поначалу, само собой разумеется, немного непривычно. Но поработайте с этой IDE пару недель, и вам не захочется слезать ни на что другое.
+
+Дополнение: Я пользуюсь Scala-плагином версии 0.41.2. По моим наблюдениям более поздние версии мене стабильны, особенно это касается интеграции с SBT.
+
+Дополнение: Тюнинг параметров JVM для нормальной работы IntelliJ IDEA
+
+Метки: Erlang, Haskell, Scala, Разработка, Функциональное программирование.
+

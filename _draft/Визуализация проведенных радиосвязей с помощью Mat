@@ -1,0 +1,133 @@
+Визуализация проведенных радиосвязей с помощью Matplotlib и Basemap
+20 марта 2019
+
+Как-то раз мне пришла идея нарисовать карту радиосвязей, проведенных в ходе экспериментов с любительским радио. Вроде бы для решения данной задачи существуют онлайн-сервисы и готовые (закрытые) программы, но мне не хотелось бы завязываться на такие решения. В свое время я где-то то ли слышал, то ли читал, что помимо построения графиков Matplotlib может рисовать еще и карты. Поэтому было решено попробовать написать соответствующий скрипт на языке Python.
+
+Установка зависимостей осуществляется так:
+
+# в MacOS:
+brew install geos
+# в Debian, если верить документации:
+# apt-get install libgeos-3.3.3 libgeos-c1 libgeos-dev
+mkvirtualenv qso-map
+pip install matplotlib pillow pyhamtools
+pip install git+https://github.com/matplotlib/basemap.git
+Библиотека pyhamtools за авторством Tobias Wellnitz, DH1TW будет использована для преобразования QTH locator в координаты GPS, а также для вычисления расстояния между двумя QTH. Точных QTH для ранее проведенных радиосвязей у меня не было, только позывные корреспондентов. К счастью, большинство радиолюбителей имеют свою страничку на qrzcq.com, откуда можно получить их QTH locator.
+
+Конечно же, собирать эти данные вручную в мои планы не входило:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import re
+import os
+import sys
+import time
+import argparse
+import requests
+
+HEADERS = {}
+HEADERS['user-agent'] = u'Mozilla/5.0 (compatible; MSIE 9.0; ' + \
+  u'Windows NT 6.0; Trident/5.0;  Trident/5.0)'
+
+def call_sign_to_qth(call):
+    url = 'https://www.qrzcq.com/call/'+call.upper()
+    res = requests.get(url, headers = HEADERS)
+    body = res.text
+    m = re.search("""(?is)<b>Locator:</b></td><td align="left">"""+\
+        """(?:<font[^>]*>)?([A-Z0-9]{6})""", body)
+    if m is None:
+        return ""
+    return m.group(1).strip()
+
+parser = argparse.ArgumentParser(description='Convert '+\
+    'call signs to QTH using qrzcq.com')
+parser.add_argument(
+    '-i', '--infile', metavar='FILE', type=str,
+    required=True, help='file containing list of call signs')
+args = parser.parse_args()
+
+first = True
+with open(args.infile) as f:
+    for line in f:
+        if not first:
+            print("Waiting 120 seconds...", file=sys.stderr)
+            time.sleep(120) # otherwise qrzcq.com blocks by IP
+        first = False
+        call = line.strip()
+        print("Resolving {}...".format(call), file=sys.stderr)
+        qth = call_sign_to_qth(call)
+        if qth == "":
+            print("{} - not found :(".format(call), file=sys.stderr)
+            continue
+        print("{} - loc: {}".format(call, qth), file=sys.stderr)
+        print("{} {}".format(call, qth))
+Непосредственно же построение карты осуществляется следующим скриптом:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import matplotlib as mpl
+# for MacOS, see https://stackoverflow.com/a/21789908/1565238
+mpl.use('TkAgg')
+
+from mpl_toolkits.basemap import Basemap
+import numpy as np
+import matplotlib.pyplot as plt
+import pyhamtools.locator as htl
+import argparse
+import os
+import sys
+
+parser = argparse.ArgumentParser(description='Render a QSO map')
+parser.add_argument(
+    '-s', '--shack', metavar='QTH', type=str,
+    required=True, help='your shack QTH')
+parser.add_argument(
+    '-i', '--infile', metavar='FILE', type=str,
+    required=True, help='file containing list of QTHs')
+parser.add_argument(
+    '-o', '--outfile', metavar='FILE', type=str,
+    required=True, help='where to save the resulting image')
+args = parser.parse_args()
+
+dpi = 80
+fig = plt.figure(dpi = dpi, figsize = (8*1024 / dpi, 4*1024 / dpi) )
+ax=fig.add_axes([0.1,0.1,0.8,0.8])
+
+m = Basemap(projection='cyl', resolution=None,
+            llcrnrlat=-90, urcrnrlat=90,
+            llcrnrlon=-180, urcrnrlon=180)
+
+(shack_lat, shack_lon) = htl.locator_to_latlong(args.shack)
+
+max_distance = 0
+max_qth = args.shack
+
+with open(args.infile) as f:
+    for line in f:
+        qth = line.strip()
+        distance = htl.calculate_distance(args.shack, qth)
+        if distance > max_distance:
+            max_distance = distance
+            max_qth = qth
+        (lat, lon) = htl.locator_to_latlong(line.strip())
+        m.drawgreatcircle(shack_lon,shack_lat,lon,lat,
+            linewidth=2,color='r')
+
+# ax.set_title('Some title')
+m.bluemarble()
+fig.savefig(args.outfile)
+
+print("Max distance: {} km, qth: {}".format(max_distance, max_qth))
+И, наконец, результат (кликабельно, JPEG, 2760x1400, 1.1 Мб):
+
+Карта QSO, построенная с помощью Matplotlib и Basemap
+
+Можно построить карту поинтереснее, если использовать разные цвета для разных радиолюбительских диапазонов, использованных антенн, и так далее. Также скрипт легко модифицировать для визуализации любой другой информации, например, GPS-координат какого-то подвижного объекта. Больше примеров карт, которые можно построить с помощью Matplotlib и Basemap, вы найдете здесь.
+
+Это все, о чем я хотел сегодня рассказать. Надеюсь, вы нашли данную информацию полезной.
+
+Дополнение: Рисуем диаграммы Вольперта-Смита на Python
+
+Метки: Python, Любительское радио.

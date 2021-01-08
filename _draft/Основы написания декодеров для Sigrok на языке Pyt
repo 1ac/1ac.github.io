@@ -1,0 +1,372 @@
+Основы написания декодеров для Sigrok на языке Python
+2 июля 2018
+
+Если вы читали пост Знакомимся с Sigrok и логическим анализатором DSLogic, то помните, что для Sigrok можно писать декодеры протоколов (protocol decoders, в документации к Sigrok часто используется сокращение PD) на Python. Однако в посте ничего не говорится о том, как их, собственно, писать. Пришло время заполнить этот пробел.
+
+Примечание: Если вы пропустили статью Как стать контрибьютором в open source проект — идеи для первого патча и прочие рекомендации, может быть не лишено смысла ознакомиться с ней.
+
+Основные сведения
+В этом контексте нельзя не сказать пару слов о процессе разработки Sigrok. Каким образом новые декодеры (или патчи к существующим) попадают в него? Для этого нужно предложить патчи в рассылке sigrok-devel. Притом мейнтейнеры предпочитают патчи в виде веток на GitHub, а не в файлов .patch. В качестве конкретного примера рассмотрим написанный мной декодер протокола TFT-дисплеев на базе ST7735. Соответствующее письмо в рассылку можно найти здесь.
+
+Вы обратили внимание, что я сказал патчи, во множественном числе? Патчей действительно нужно несколько:
+
+Патч для репозитория sigrok-dumps, добавляющий .sr файл с примером декодируемого протокола. Пример моего патча: 1ea7b9af.
+Патч для репозитория libsigrokdecode, добавляющий сам декодер на Python. Пример: f62e32bc.
+Наконец, патч для sigrok-test, добавляющий регрессионные тесты на написанный декодер. Пример: 4aa3a4fd.
+Получить файл .sr не сложно, это делается банально с помощью sigrok-cli или PulseView. Заметьте, что пример следует сократить до минимального. Обрезать лишнее можно в PulseView с помощью курсоров. Также стоит иметь ввиду, что в идеале записанный пример должен покрывать все, или хотя бы большинство возможностей декодера (например, все декодируемые команды). В связи с этим может потребоваться написать кастомную прошивку для вашей любимой отладочной платы.
+
+В общем, эта часть работы тривиальна. Поэтому далее мы сосредоточимся на написании декодера и тестов к нему.
+
+Разработка декодера
+На время разработки декодера нужно как-то заставить sigrok-cli и PulseView его видеть. Проще всего сделать это с помощью символьной ссылки:
+
+cd /usr/share/libsigrokdecode/decoders
+sudo ln -s /path/to/libsigrokdecode/decoders/st7735 ./st7735
+Декодер состоит из двух файлов. Файл __init__.py в основном содержит лицензию и краткое описание декодера:
+
+##
+## This file is part of the libsigrokdecode project.
+##
+## Copyright (C) 2018 Aleksander Alekseev <afiskon@gmail.com>
+##
+## This program is free software; you can redistribute it and/or modify
+## it under the terms of the GNU General Public License as published by
+## the Free Software Foundation; either version 2 of the License, or
+## (at your option) any later version.
+##
+## This program is distributed in the hope that it will be useful,
+## but WITHOUT ANY WARRANTY; without even the implied warranty of
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+## GNU General Public License for more details.
+##
+## You should have received a copy of the GNU General Public License
+## along with this program; if not, see <http://www.gnu.org/licenses/>.
+##
+
+'''
+This decoder decodes the ST7735 TFT controller protocol.
+
+Details:
+http://www.displayfuture.com/Display/datasheet/controller/ST7735.pdf
+'''
+
+from .pd import Decoder
+Самое же интересное содержится в файле pd.py. Рассмотрим его по частям.
+
+import sigrokdecode as srd
+
+MAX_DATA_LEN = 128
+
+# Command ID -> name, short description
+META = {
+    0x00: {'name': 'NOP    ', 'desc': 'No operation'},
+    0x01: {'name': 'SWRESET', 'desc': 'Software reset'},
+    0x04: {'name': 'RDDID  ', 'desc': 'Read display ID'},
+    # ... (ПРОПУЩЕНО) ...
+}
+Здесь просто объявляются константы, используемые далее по коду. Переменная META, как не сложно понять, служит для отображения кода команды в ее название и краткое описание. Эта информация была получена из даташита ST7735.
+
+class Ann:
+    BITS, CMD, DATA, DESC = range(4)
+
+class Decoder(srd.Decoder):
+    api_version = 3
+    id = 'st7735'
+    name = 'ST7735'
+    longname = 'Sitronix ST7735'
+    desc = 'Sitronix ST7735 TFT controller protocol.'
+    license = 'gplv2+'
+    inputs = ['logic']
+    outputs = ['st7735']
+    channels = (
+        {'id': 'cs', 'name': 'CS#', 'desc': 'Chip-select'},
+        {'id': 'clk', 'name': 'CLK', 'desc': 'Clock'},
+        {'id': 'mosi', 'name': 'MOSI', 'desc': 'Master out, slave in'},
+        {'id': 'dc', 'name': 'DC', 'desc': 'Data or command'}
+    )
+    annotations = (
+        ('bit', 'Bit'),
+        ('command', 'Command'),
+        ('data', 'Data'),
+        ('description', 'Description'),
+    )
+    annotation_rows = (
+        ('bits', 'Bits', (Ann.BITS,)),
+        ('fields', 'Fields', (Ann.CMD, Ann.DATA)),
+        ('description', 'Description', (Ann.DESC,)),
+    )
+Класс Decoder представляет собой непосредственно наш декодер. Класс должен иметь несколько обязательных полей, содержащие уникальный идентификатор протокола, его имя, краткое описание, информацию о лицензии. Поля inputs и outputs определяют, какие данные декодер принимает на вход и выдает на выход. Это нужно по той причине, что Sigrok позволяет писать декодеры, работающие поверх других декодеров. Например, нередко нужно написать декодер, работающий поверх декодера SPI или I2C. В данном примере декодер работает непосредственно с логическими сигналами, не полагаясь на другие декодеры. Поле channels определяет, какие сигналы нужны декодеру на вход. Поля annotations и annotation_rows говорят, какие данные выводит наш декодер, притом последнее поле нужно для объединения этих данных в группы.
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.accum_byte = 0
+        self.accum_bits_num = 0
+        self.bit_ss = -1
+        self.byte_ss = -1
+        self.current_bit = -1
+
+    def start(self):
+        self.out_ann = self.register(srd.OUTPUT_ANN)
+
+    def put_desc(self, ss, es, cmd, data):
+        if cmd == -1:
+            return
+        if META[cmd]:
+            self.put(ss, es, self.out_ann, [Ann.DESC,
+                ['%s: %s' % (META[cmd]['name'].strip(),
+                             META[cmd]['desc'])]])
+        else:
+            # Default description:
+            dots = ''
+            if len(data) == MAX_DATA_LEN:
+                data = data[:-1]
+                dots = '...'
+            data_str = '(none)'
+            if len(data) > 0:
+                data_str = ' '.join(['%02X' % b for b in data])
+            self.put(ss, es, self.out_ann, [Ann.DESC,
+                ['Unknown command: %02X. Data: %s%s' % (cmd, data_str,
+                                                        dots)]])
+Имена методов __init__, reset и start говорят сами за себя. Метод put_desc, используемый далее по коду, присваивает диапазону входных данных текстовое описание. Делается это через вызов унаследованного от родительского класса srd.Decoder метода put. Для идентификации начала и конца входных данных, которым мы хотим сопоставить какой-то выход декодера, используются целые числа, называемые start sample и end sample. В коде их часто сокращают до ss и es.
+
+Наконец, основным методом является decode:
+
+def decode(self):
+    current_cmd = -1
+    current_data = []
+    desc_ss = -1
+    desc_es = -1
+    self.reset()
+    while True:
+        # Check data on both CLK edges.
+        (cs, clk, mosi, dc) = self.wait({1: 'e'})
+
+        if cs == 1: # Wait for CS = low, ignore the rest.
+            self.reset()
+            continue
+
+        if clk == 1:
+            # Read one bit.
+            self.bit_ss = self.samplenum
+            if self.accum_bits_num == 0:
+                self.byte_ss = self.samplenum
+            self.current_bit = mosi
+
+        if (clk == 0) and (self.current_bit >= 0):
+            # Process one bit.
+            self.put(self.bit_ss, self.samplenum, self.out_ann,
+                     [Ann.BITS, [str(self.current_bit)]])
+            # MSB-first
+            self.accum_byte = (self.accum_byte << 1) | self.current_bit
+            self.accum_bits_num += 1
+            if self.accum_bits_num == 8:
+                # Process one byte.
+                # DC = low for commands.
+                ann = Ann.DATA if dc else Ann.CMD
+                self.put(self.byte_ss, self.samplenum, self.out_ann,
+                         [ann, ['%02X' % self.accum_byte]])
+                if ann == Ann.CMD:
+                    self.put_desc(desc_ss, desc_es, current_cmd,
+                                  current_data)
+                    desc_ss = self.byte_ss
+                    desc_es = self.samplenum # For cmds without data.
+                    current_cmd = self.accum_byte
+                    current_data = []
+                else:
+                    if len(current_data) < MAX_DATA_LEN:
+                        current_data += [self.accum_byte]
+                    desc_es = self.samplenum
+
+                self.accum_bits_num = 0
+                self.accum_byte = 0
+                self.byte_ss = -1
+            self.current_bit = -1
+            self.bit_ss = -1
+Данные для декодирования приходят через вызов унаследованного метода wait. Притом, передав этому методу аргумент {1: 'e'}, мы говорим, что хотим получать данные только по переднему или заднему фронту на первом канале, которому у нас соответствует CLK (нумерация каналов идет с нуля). Также помимо e (edge) можно указать r (rising edge) или f (falling edge), если нас интересует не любой фронт, а только передний или только задний. В принципе, можно и не указывать ничего, получая вообще все входные данные, какие есть. Но в этом случае скорость работы декодера будет оставлять желать лучшего.
+
+Так или иначе, благодаря вызову wait переменным cs, clk, mosi и dc присваиваются единички и нолики в соответствии со значениями на каналах. Понять, по какому смещению относительно начала данных мы находимся, можно благодаря унаследованному полю samplenump. Остальное — дело техники. Единички и нолики выводятся с аннотацией Ann.BITS, из них собираются байты, выводимые с аннотациями Ann.CMD или Ann.DATA, а байты декодируются в текстовое описание, выводимое при помощи объявленного выше метода put_desc.
+
+Напомню, как выглядит результат:
+
+Протокол ST7735 в PulseView
+
+На приведенной картинке фиолетовым цветом изображены биты (Ann.BITS). Под ними идут байты, зеленые соответствуют командам (Ann.CMD), а синие — аргументам команд (Ann.DATA). Наконец, под байтами выводится текстовое описание команды (Ann.DESC).
+
+Вот и весь код! Стоит, впрочем, сказать пару слов об отладке. Иной раз трудно понять, какие данные приходят в тот или иной метод, особенно если вы пишете декодер, работающий поверх другого декодера. Вот, к примеру, шаблон ничего не делающего декодера, работающего поверх декодера SPI:
+
+import sigrokdecode as srd
+
+class Ann:
+    CMD, DATA, DESC = range(3)
+
+class Decoder(srd.Decoder):
+    # see https://sigrok.org/wiki/Protocol_decoder_API
+    api_version = 3
+    id = 'st7735' # this is shown in `sigrok-cli -L`
+    name = 'ST7735' # this is shown in PulseView
+    longname = 'ST7735 TFT controller' # shown in `sigrok-cli -L`
+    desc = 'ST7735 TFT controller protocol decoder'
+    license = 'gplv2+'
+    inputs = ['spi']
+    outputs = ['st7735']
+    channels = ( )
+    optional_channels = ( )
+    annotations = (
+        ('command', 'Command'),         # Ann.CMD
+        ('data', 'Data'),               # Ann.DATA
+        ('description', 'Description'), # Ann.DESC
+    )
+    annotation_rows = (
+        ('fields', 'Fields', (Ann.CMD, Ann.DATA,)),
+        ('description', 'Description', (Ann.DESC,)),
+    )
+    options = ( ) # see examples in spiflash decoder
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        pass # do nothing, yet
+
+    # This function is called before the beginning of the decoding.
+    # This is the place to register() the output types, check the
+    # user-supplied PD options for validity, and so on
+    def start(self):
+        self.out_ann = self.register(srd.OUTPUT_ANN)
+
+    def putx(self, data):
+        self.put(self.ss, self.es, self.out_ann, data)
+
+    # This is a function that is called by the libsigrokdecode
+    # backend whenever it has a chunk of data for the protocol
+    # decoder to handle
+    # Arguments:
+    # ss =   startsample, the absolute samplenumber of the
+    #        first sample in this chunk of data
+    # es =   endsample, the absolute samplenumber of the
+    #        last sample in this chunk of data
+    # data = a list containing the data to decode. Depends on
+    #        whether the decoder decodes raw samples or is
+    #        stacked onto another decoder
+    def decode(self, ss, es, data):
+        print("decode: ss = %s, es = %s, data = %s" % (ss, es, data) )
+        ptype, mosi, miso = data
+
+        self.ss, self.es = ss, es
+
+        if ptype == 'CS-CHANGE':
+            # end_current_transaction()
+            pass
+
+        if ptype != 'DATA':
+            return
+
+        # Handle commands here
+        self.putx([Ann.DESC, ['Unknown command: 0x%02X' % mosi]])
+Обратите внимание на отладочный вывод с помощью print, а также на то, что данные здесь приходят не через вызов wait, а напрямую в метод decode, имеющий другую сигнатуру. Теперь можно сказать:
+
+pulseview --log-to-stdout ~/temp/st7735-debug.sr | tee ~/temp/pv.log
+Отладочный вывод декодера будет виден в консоли.
+
+Покрываем код текстами
+Итак, будем считать, что с декодером мы разобрались. Осталось добавить тесты на него. На этом шаге лучше не полагаться на установленные бинарные пакеты Sigrok, а честно собрать их из веток master. Тем более, что половину репозиториев мы и так же склонировали. Делается это не сложно и занимает пару минут:
+
+mkidir -p /home/eax/sigrok-dev/src
+cd /home/eax/sigrok-dev/src
+
+git clone 'git://sigrok.org/libsigrok'
+git clone 'git://sigrok.org/sigrok-cli'
+git clone 'git://sigrok.org/libsigrokdecode'
+
+cd libsigrok
+./autogen.sh
+CFLAGS='-O0 -g' CXXFLAGS='-O0 -g' ./configure \
+  --prefix=/home/eax/sigrok-dev/install \
+  --disable-java --disable-python
+make
+make install
+
+cd ../libsigrokdecode
+./autogen.sh
+CFLAGS='-O0 -g' CXXFLAGS='-O0 -g' ./configure \
+  --prefix=/home/eax/sigrok-dev/install
+make
+make install
+
+cd ../sigrok-cli
+./autogen.sh
+CFLAGS='-O0 -g' CXXFLAGS='-O0 -g' ./configure \
+  --prefix=/home/eax/sigrok-dev/install
+make
+make install
+
+cd ..
+Fun fact! Все зависимости я лично подтянул очень просто — собрал пакеты из AUR, но не стал их устанавливать. Даже если вы пользуетесь дистрибутивом, отличным от Arch Linux, вы можете подсмотреть список зависимостей в AUR.
+
+Собирать PulseView при разработке декодеров, строго говоря, не требуется, но если очень хочется:
+
+git clone git://sigrok.org/pulseview
+
+cd pulseview
+mkdir build
+cd build
+PKG_CONFIG_PATH=/home/eax/sigrok-dev/install/lib/pkgconfig/ \
+  cmake -G Ninja \
+  -DCMAKE_INSTALL_PREFIX:PATH=/home/eax/sigrok-dev/install \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS='-O0 -g -fext-numeric-literals' ..
+ninja
+ninja install
+Если вы хотите использовать Sigrok и PulseView из веток master, допишите в файл ~/.bashrc:
+
+export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:~/sigrok-dev/install/lib/"
+export PATH="~/sigrok-dev/install/bin:$PATH"
+Возвращаемся к тестами:
+
+git clone git://sigrok.org/sigrok-test
+cd sigrok-test
+
+./autogen.sh
+PKG_CONFIG_PATH=$HOME/sigrok-dev/install/lib/pkgconfig \
+  ./configure \
+  --with-decodersdir=$HOME/sigrok-dev/libsigrokdecode/decoders
+make
+Проверяем, что тесты проходят:
+
+LD_LIBRARY_PATH=$HOME/sigrok-dev/install/lib \
+  ./decoder/pdtest -r -v -a
+Чтобы сгенерировать ожидаемый вывод для нашего нового декодера, пишем в decoder/test/st7735/test.conf:
+
+test st7735_basic
+    protocol-decoder st7735 channel cs=0 channel dc=2 channel mosi=3 ?
+                            channel clk=4
+    input display/st7735/st7735.sr
+    output st7735 annotation match st7735_basic.output
+Говорим:
+
+LD_LIBRARY_PATH=$HOME/sigrok-dev/install/lib \
+  ./decoder/pdtest -f st7735
+Будет получен файл decoder/test/st7735/st7735_basic.output с ожидаемым выводом. Для запуска отдельного теста говорим:
+
+LD_LIBRARY_PATH=$HOME/sigrok-dev/install/lib \
+  ./decoder/pdtest -r st7735
+Эксперимента ради можно отредактировать файл .output и убедиться, что в этом случае тесты не пройдут:
+
+Testcase: st7735/st7735_basic/annotation
+Test output mismatch:
+- 24003758-24003780 st7735: command: "11"
++ 24003758-24003780 st7735: command: "01"
+Заинтересованные читатели могут использовать информацию из этого раздела не только для разработки декодеров, но и для разработки кишок Sigrok и PulseView. Здесь вам также помогут заметки Памятка по отладке при помощи GDB, Краткий обзор статических анализаторов кода на C/C++, Профилирование кода на C/C++ в Linux и FreeBSD и далее по ссылкам.
+
+Заключение
+Кое-какие дополнительные сведения можно найти на официальной wiki проекта:
+
+https://sigrok.org/wiki/Protocol_decoder_API;
+https://sigrok.org/wiki/Protocol_decoder_HOWTO;
+Также не побрезгуйте почитать код других декодеров из libsigrokdecode, там полно примеров. За помощью всегда можно обратиться в уже упомянутую рассылку sigrok-devel. А еще сообщество разработчиков Sigrok довольно активно в IRC, на канале #sigrok во FreeNode.
+
+Как видите, Sigrok имеет относительно невысокий порог вхождения. Стать контрибьютором в него очень просто — берете случайную железку и пишите для используемого ею протокола декодер на Python. А когда и если это перестанет быть интересным, можно заняться разработкой PulseView или драйверов для новых логических анализаторов, мультиметров и осциллографов. В общем, если вы искали открытый проект для самореализации, рекомендую!
+
+Метки: Python, Электроника.

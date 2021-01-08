@@ -1,0 +1,134 @@
+Управление VirtualBox из консоли с помощью vboxmanage
+9 ноября 2016
+
+Такие решения, как LXC и KVM, не всегда удобны, потому что они работают только под Linux. Используя их, вы не можете передать виртуалки пользователям каких-нибудь MacOS или Windows. По этой причине, а также потому что на практике у меня еще не возникало необходимости запускать больше пяти ВМ одновременно, я все еще предпочитаю VirtualBox. Им можно управлять из консоли при помощи Vagrant, но Vagrant всегда делал чуть-чуть не то, что мне на самом деле было нужно. Например, я хочу, чтобы по дэфолту все виртуалки всегда были в одной NAT-сети, без какой-либо правки Vagrantfile’ов. Все это сподвигло меня к изучению «родных» утилит VirtualBox, в частности, vboxmanage.
+
+Давайте же посмотрим, как все, что вы когда-либо можете захотеть от виртуалок, делается с помощью vboxmanage.
+
+Просмотреть настройки VirtualBox:
+
+vboxmanage list systemproperties
+Изменение настроек, например, пути до каталога, гда хранятся виртуалки:
+
+vboxmanage setproperty machinefolder /home/eax/virtualbox
+Список поддерживаемых типов виртуалок:
+
+vboxmanage list ostypes
+vboxmanage list ostypes | egrep ^ID
+Создаем новую виртуалку:
+
+vboxmanage createvm --name ubuntu1604 --ostype Ubuntu_64 --register
+Меняем параметры ВМ — указываем количество памяти и тд:
+
+vboxmanage modifyvm ubuntu1604 --cpus 1 --memory 512 --audio none \
+  --usb off --acpi on --boot1 dvd --nic1 nat
+Создаем жесткий диск размером 10 Гб (место по дэфолту не преаллоцируется):
+
+vboxmanage createhd \
+  --filename /home/eax/virtualbox/ubuntu1604/ubuntu1604.vdi \
+  --size 10000
+Цепляем созданный жесткий диск к виртуалке:
+
+vboxmanage storagectl ubuntu1604 --name ide-controller --add ide
+vboxmanage storageattach ubuntu1604 --storagectl ide-controller \
+  --port 0 --device 0 --type hdd \
+  --medium /home/eax/virtualbox/ubuntu1604/ubuntu1604.vdi
+Цепляем к ВМ ISO-образ, с которого будет происходить установка системы:
+
+vboxmanage storageattach ubuntu1604 --storagectl ide-controller \
+  --port 0 --device 1 --type dvddrive \
+  --medium /home/eax/data/iso/ubuntu-16.04.1-server-amd64.iso
+Включаем доступ к ВМ по VNC:
+
+vboxmanage modifyvm ubuntu1604 --vrde on
+vboxmanage modifyvm ubuntu1604 --vrdeaddress 127.0.0.1
+vboxmanage modifyvm ubuntu1604 --vrdeport 3001
+vboxmanage modifyvm ubuntu1604 --vrdeproperty VNCPassword="secret"
+Я лично для подключения использую TigerVNC (форк TightVNC):
+
+vncviewer localhost:3001
+Чтобы каждый раз не вводить пароль, можно сказать:
+
+vncpasswd ./vnc.password
+… и всегда использовать этот файл:
+
+vncviewer localhost:3001 PasswordFile=/home/eax/temp/vnc.password
+Посмотреть свойства виртуальной машины (узнать номер порта VNC):
+
+vboxmanage showvminfo ubuntu1604  | grep VRDE
+Запустить виртуалку:
+
+# если на десктопе
+vboxmanage startvm ubuntu1604
+
+# если все это крутится на сервере и собираемся подрубаться по VNC
+vboxmanage startvm --type headless ubuntu1604
+Для некоторых систем установочный диск отключается от ВМ автоматически по окончанию установки. Если этого не произошло, говорим:
+
+vboxmanage storageattach archlinux1 --storagectl ide-controller \
+  --port 0 --device 1 --type dvddrive --medium emptydrive
+Pause, Resume, Poweroff:
+
+vboxmanage controlvm archlinux1 pause
+vboxmanage controlvm archlinux1 resume
+vboxmanage controlvm archlinux1 poweroff
+Проброс портов настраивается так (ВМ должна быть остановлена):
+
+vboxmanage modifyvm ubuntu1604 --natpf1 "ssh-forwarding,tcp,,22001,,22"
+После этого в виртуалку можно будет зайти по SSH таким образом:
+
+ssh -p 22001 eax@localhost
+Просмотр списка правил перенаправления портов:
+
+vboxmanage showvminfo ubuntu1604 | grep Rule
+Удаление правила:
+
+vboxmanage modifyvm ubuntu1604 --natpf1 delete ssh-forwarding
+Список всех виртуалок:
+
+vboxmanage list vms
+vboxmanage list vms --long | egrep '^(Name|State)'
+Список работающих виртуалок:
+
+vboxmanage list runningvms
+Переименовать ВМ (при этом переименовывается и ее каталог):
+
+vboxmanage modifyvm ubuntu1604 --name ubuntu1
+Создать полный клон ВМ:
+
+vboxmanage clonevm ubuntu1 --name ubuntu2 --register
+Список NAT-сетей:
+
+vboxmanage natnetwork list
+Создание новой сети:
+
+vboxmanage natnetwork add --netname UbuntuNat --network 10.0.4.0/24 \
+  --enable --dhcp on --ipv6 off
+Редактирование сети:
+
+vboxmanage natnetwork modify --netname UbuntuNat --ipv6 on
+Удаление сети:
+
+vboxmanage natnetwork remove --netname UbuntuNat
+Подключение виртуалок к NAT-сети:
+
+vboxmanage modifyvm ubuntu1 --nic2 natnetwork --nat-network2 UbuntuNat
+vboxmanage modifyvm ubuntu2 --nic2 natnetwork --nat-network2 UbuntuNat
+Важно! Скорее всего, гостевая операционная система окажется не настроена для использования второго интерфейса, если вы добавили его после установки. В Ubuntu для добавления нового интерфейса нужно отредактировать файл /etc/network/interfaces, для Arch Linux см заметку Как я устанавливал Arch Linux на свой ноутбук.
+
+Удалить виртуалку и все ассоциированные с ней файлы, в том числе и диски:
+
+vboxmanage unregistervm ubuntu2 --delete
+Экспорт:
+
+vboxmanage export ubuntu2 --output ubuntu2.ova
+Импорт:
+
+vboxmanage import ubuntu2.ova
+# или, с переопределением имени:
+vboxmanage import ubuntu2.ova --vsys 0 --vmname ubuntu2
+Это, разумеется, далеко не полный список возможностей vboxmanage. Например, мы не рассмотрели использование снапшотов, соединение машин при помощи последовательного порта (например, для отладки ядра операционной системы), работу с разделяемыми каталогами, и многе другое. Подробности вы найдете в официальной документации и vboxmanage --help.
+
+Вооруженный приведенными выше знаниями, я написал скрипт на Python под названием vm, который управляет виртуальными машинами в точности так, как мне это удобно. Поэтому я считаю, что Vagrant не нужен. А вы что скажете?
+
+Метки: Linux, Виртуализация.

@@ -1,0 +1,146 @@
+Пример сбора почты по протоколу IMAP на Python
+15 июня 2017
+
+Подготавливая заметку Основы полнотекстового поиска в PostgreSQL, я столкнулся с необходимостью взять где-то много текстовых данных для индексирования. Первой мыслью было индексировать списки рассылок. Но собрать достаточное количество писем за разумное время было не так-то просто, поэтому в итоге я остановился на индексировании дампа Википедии. И хотя задача была успешно решена, мне захотелось разобраться, как можно было бы написать поисковик по мейлинг листам.
+
+Задачка не сложная. Заводим email, подписываем его на интересные нам списки рассылок, собираем письма по протоколу IMAP, текст писем индексируем при помощи GIN. Последнее мы уже умеем. Осталось только разобраться, как забирать письма по IMAP. Для решения этой проблемы в моем любимом Python из коробки есть библиотека imaplib. Используется она примерно следующим образом.
+
+Заходим на сервер:
+
+>>> import imaplib
+>>> import getpass
+>>> imap = imaplib.IMAP4_SSL('imap.yandex.ru')
+>>> imap.login('example@yandex.ru', getpass.getpass())
+('OK', [b'LOGIN Completed.'])
+В случае любой ошибки метод login бросает исключение.
+
+Смотрим список доступных каталогов (всякие там «INBOX», «Sent», и так далее):
+
+>>> imap.list()
+('OK', [b'(\\Unmarked \\HasNoChildren \\Sent) "|" "&BB4EQgQ,BEAEM ...
+Выбираем «INBOX»:
+
+>>> imap.select('INBOX')
+('OK', [b'2'])
+Получаем список id писем через пробел:
+
+>>> imap.search(None, 'ALL')
+('OK', [b'1 2'])
+Загружаем первое письмо:
+
+>>> imap.fetch(b'1', '(RFC822)')
+('OK', [(b'1 (RFC822 {3450}', b'Received: from m ...
+Но это сырое письмо, из которого довольно непросто выцепить что-то полезное, хотя бы то же название рассылки. На помощь приходит модуль email:
+
+>>> status, data = imap.fetch(b'1', '(RFC822)')
+>>> msg = email.message_from_bytes(data[0][1],
+...   _class = email.message.EmailMessage)
+>>> msg['Subject']
+'yet another test message'
+>>> msg['X-Mailing-List']
+'pgsql-hackers'
+>>> msg['Date']
+'Tue, 30 May 2017 17:03:09 +0300'
+>>> email.utils.parsedate_tz(msg['Date'])
+(2017, 5, 30, 17, 3, 9, 0, 1, -1, 10800)
+>>> payload = msg.get_payload()[ 0 ]
+>>> payload['Content-Type']
+'text/plain; charset="UTF-8"'
+>>> payload.get_payload()
+'Test message body\r\n'
+Удаляются письма следующим образом. Сначала помечаем нужные письма, как удаленные, затем вызываем метод expunge:
+
+>>> imap.store(b'1', '+FLAGS', '\\Deleted')
+('OK', [b'1 (UID 121 FLAGS (\\Deleted \\Recent))'])
+>>> imap.expunge()
+('OK', [b'1'])
+Чтобы разлогиниться и закрыть соединение, вызываем метод logout:
+
+>>> imap.logout()
+('BYE', [b'IMAP4rev1 Server logging out'])
+Полный же код скрипта для архивации списков рассылок выглядит как-то так:
+
+#!/usr/bin/env python3
+
+# vim: set ai et ts=4 sw=4:
+
+# email-archive.py
+# (c) Aleksander Alekseev 2017
+# http://eax.me/
+
+import imaplib
+import hashlib
+import getpass
+import email
+import email.message
+import time
+import os.path
+import subprocess
+import re
+import sys
+
+# see https://stackoverflow.com/a/25457500
+imaplib._MAXLINE = 1000000
+
+server = 'imap.yandex.ru'
+login = "example@yandex.ru"
+pause_time = 300
+# >>> import hashlib
+# >>> hashlib.sha1(b"qwerty").hexdigest()
+pwhash = 'b1b3773a05c0ed0176787a4f1574ff0075f7521e'
+password = getpass.getpass("IMAP Password: ")
+
+if hashlib.sha1(bytearray(password, 'utf-8')).hexdigest() != pwhash:
+  print("Invalid password", file = sys.stderr)
+  sys.exit(1)
+
+def main_loop_proc():
+    print("Connecting to {}...".format(server))
+    imap = imaplib.IMAP4_SSL(server)
+    print("Connected! Logging in as {}...".format(login));
+    imap.login(login, password)
+    print("Logged in! Listing messages...");
+    status, select_data = imap.select('INBOX')
+    nmessages = select_data[0].decode('utf-8')
+    status, search_data = imap.search(None, 'ALL')
+    for msg_id in search_data[0].split():
+        msg_id_str = msg_id.decode('utf-8')
+        print("Fetching message {} of {}".format(msg_id_str,
+                                                 nmessages))
+        status, msg_data = imap.fetch(msg_id, '(RFC822)')
+        msg_raw = msg_data[0][1]
+        msg = email.message_from_bytes(msg_raw,
+            _class = email.message.EmailMessage)
+        # mailing_list = msg.get('X-Mailing-List', 'undefined')
+        mailing_list = msg.get('List-Id', 'undefined')
+        mailing_list = re.sub('^(?s).*?<([^>]+?)(?:\\..*?)>.*$',
+                              '\\1', mailing_list)
+        timestamp = email.utils.parsedate_tz(msg['Date'])
+        year, month, day, hour, minute, second = timestamp[:6]
+        msg_hash = hashlib.sha256(msg_raw).hexdigest()[:16]
+        fname = ("./archive/{7}/{0:04}/{0:04}-{1:02}-{2:02}/" +
+                 "{0:04}-{1:02}-{2:02}-{3:02}-{4:02}-{5:02}" +
+                 "-{6}.txt").format(
+            year, month, day, hour, minute, second,
+            msg_hash, mailing_list)
+        dirname = os.path.dirname(fname)
+        print("Saving message {} to file {}".format(msg_id_str, fname))
+        subprocess.call('mkdir -p {}'.format(dirname), shell=True)
+        with open(fname, 'wb') as f:
+            f.write(msg_raw)
+        imap.store(msg_id, '+FLAGS', '\\Deleted')
+    imap.expunge()
+    imap.logout()
+
+while True:
+    try:
+        main_loop_proc()
+    except Exception as e:
+        print("ERROR:" + str(e))
+    print("Sleeping {} seconds...".format(pause_time))
+    time.sleep(pause_time)
+Запускаем скрипт на VDS’ке тупо в каком-нибудь screen и радуемся жизни!
+
+Вот, пожалуй, и все, чем я хотел сегодня поделиться. Если вам понравился этот пост, вас также может заинтересовать заметка про парсинг RSS-лент и отправку писем по SMTP на Python. Как всегда, буду рад вашим вопросам и дополнениям.
+
+Метки: Python.

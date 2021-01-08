@@ -1,0 +1,331 @@
+Пример простейшей key-value СУБД на основе Badger
+4 февраля 2019
+
+Badger — это реализация LSM tree на языке Go. Не будет преувеличением сказать, что это как RocksDB, только написанный с нуля на другом языке программирования. Библиотека основана на WiscKey paper [PDF], обмазана кучей всевозможных тестов, неплохо показывает себя на бенчмарках, ну и в целом производит впечатление серьезного проекта. Мне захотелось познакомиться с библиотекой поближе. Поэтому я написал на ней простенькую key-value СУБД с REST-интерфейсом.
+
+Вот что вышло в итоге:
+
+package main
+
+import (
+  "encoding/json"
+  "flag"
+  "time"
+  "fmt"
+  "io/ioutil"
+  "net/http"
+  "runtime"
+  "strconv"
+  _ "net/http/pprof"
+
+  "github.com/dgraph-io/badger"
+  "github.com/gorilla/mux"
+  "github.com/sirupsen/logrus"
+)
+
+var db *badger.DB
+const InvalidVersion uint64 = 0
+
+func openDatabase(path string) error {
+  opts := badger.DefaultOptions
+  opts.Dir = path
+  opts.ValueDir = path
+  var err error
+  db, err = badger.Open(opts)
+  return err
+}
+
+func badgerCleanupProc() {
+  ticker := time.NewTicker(5 * time.Minute)
+  defer ticker.Stop()
+  for range ticker.C {
+  again:
+    logrus.Infof("calling db.RunValueLogGC...")
+    err := db.RunValueLogGC(0.7)
+    if err == nil {
+      goto again
+    }
+  }
+}
+
+func reportError(w http.ResponseWriter, err error) {
+  type JsonError struct {
+    Error  string `json:"error"`
+  }
+
+  jsonError := &JsonError{ Error: err.Error() }
+  w.WriteHeader(400)
+  encErr := json.NewEncoder(w).Encode(jsonError)
+  if encErr != nil {
+    logrus.Errorf("json.Encode failed: %v\n", encErr)
+  }
+}
+
+func keyAndVersion(r *http.Request) ([]byte, uint64, error) {
+  vars := mux.Vars(r)
+  key := []byte(vars["key"])
+
+  var err error
+  ver := InvalidVersion
+  query := r.URL.Query()
+  verStr := query.Get("ver")
+  if verStr != "" {
+    ver, err = strconv.ParseUint(verStr, 16, 64)
+    if err != nil {
+      return nil, InvalidVersion, err
+    }
+  }
+
+  return key, ver, nil
+}
+
+func GetHandler(w http.ResponseWriter, r *http.Request) {
+  key, ver, err := keyAndVersion(r)
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  logrus.Debugf("GetHandler: key = %s, ver = %x\n", key, ver)
+
+  var valCopy []byte
+  var verCopy uint64
+  err = db.View(func(txn *badger.Txn) error {
+    item, err := txn.Get(key)
+    if err != nil {
+      return err
+    }
+    verCopy = item.Version()
+    if ver != InvalidVersion && ver != verCopy {
+      return fmt.Errorf("version mismatch")
+    }
+    valCopy, err = item.ValueCopy(nil)
+    return err
+  })
+
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  h := w.Header()
+  h.Set("Content-Type", "application/octet-stream")
+  h.Set("X-Version", strconv.FormatUint(verCopy, 16))
+  w.WriteHeader(200)
+  _, err = w.Write(valCopy)
+  if err != nil {
+    logrus.Errorf("GetHandler, w.Write: %v\n", err)
+  }
+}
+
+func PutHandler(w http.ResponseWriter, r *http.Request) {
+  key, ver, err := keyAndVersion(r)
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  logrus.Debugf("PutHandler: key = %s, ver = %x\n", key, ver)
+
+  val, err := ioutil.ReadAll(r.Body)
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  err = db.Update(func(txn *badger.Txn) error {
+    if ver != InvalidVersion {
+      item, err := txn.Get(key)
+      if err != nil {
+        return err
+      }
+
+      if item.Version() != ver {
+        err = fmt.Errorf("version mismatch")
+        return err
+      }
+    }
+
+    return txn.Set(key, val)
+  })
+
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  h := w.Header()
+  h.Set("Content-Type", "application/octet-stream")
+  w.WriteHeader(200)
+}
+
+func DelHandler(w http.ResponseWriter, r *http.Request) {
+  key, ver, err := keyAndVersion(r)
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  logrus.Debugf("DelHandler: key = %s, ver = %x\n", key, ver)
+
+  err = db.Update(func(txn *badger.Txn) error {
+    if ver != InvalidVersion {
+      item, err := txn.Get(key)
+      if err != nil {
+        return err
+      }
+
+      if item.Version() != ver {
+        err = fmt.Errorf("version mismatch")
+        return err
+      }
+    }
+
+    return txn.Delete(key)
+  })
+  if err != nil {
+    reportError(w, err)
+    return
+  }
+
+  h := w.Header()
+  h.Set("Content-Type", "application/octet-stream")
+  w.WriteHeader(200)
+}
+
+var databasePath string
+var listenAddr string
+var verboseLogging bool
+var profile bool
+
+func main() {
+  flag.StringVar(&databasePath, "database", "./database",
+    "Path to the database")
+  flag.StringVar(&listenAddr, "listen", ":8080",
+    "Listen address")
+  flag.BoolVar(&verboseLogging, "verbose", true,
+    "Enable verbose logging")
+  flag.BoolVar(&profile, "profile", false,
+    "Enable blocks and mutexes profiling")
+  flag.Parse()
+
+  if profile {
+    runtime.SetBlockProfileRate(20)
+    runtime.SetMutexProfileFraction(20)
+  }
+
+  if verboseLogging {
+    logrus.SetLevel(logrus.DebugLevel)
+  }
+
+  err := openDatabase(databasePath)
+  if err != nil {
+    logrus.Fatalf("openDatabase: %v\n", err)
+  }
+
+  defer func() {
+    err := db.Close()
+    if err != nil {
+      logrus.Fatalf("db.Close(): %v\n", err)
+    }
+  }()
+
+  logrus.Infof("Starting badgerCleanupProc...")
+  go badgerCleanupProc()
+
+  logrus.Infof("Database ready! Starting HTTP server at %s...",
+    listenAddr)
+
+  r := mux.NewRouter().
+    PathPrefix("/api/v1").
+    Path("/{key}").
+    Subrouter()
+
+  r.Methods("GET").
+    HandlerFunc(GetHandler)
+
+  r.Methods("PUT").
+    HandlerFunc(PutHandler)
+
+  r.Methods("DELETE").
+    HandlerFunc(DelHandler)
+
+  http.Handle("/", r)
+  err = http.ListenAndServe(listenAddr, nil)
+  if err != nil {
+    logrus.Fatalf("http.ListenAndServe: %v\n", err)
+  }
+
+  logrus.Info("HTTP server terminated\n")
+}
+Подробно описывать словами код мне что-то не хочется. Во-первых, для меня он выглядит довольно понятным. Во-вторых, Badger имеет вполне адекватную документацию, и мое объяснение свелось бы к ее пересказу. Из возможных граблей стоит отметить разве что тот факт, что сборка мусора в Badger происходит явно, см функцию badgerCleanupProc. Сделано так для того, чтобы GC можно было запускать по расписанию, например, во время минимума активности пользователей. Если забыть про сборку мусора, это приведет к бесконечному росту базы данных.
+
+Демонстрация работы основных методов, а также compare and swap:
+
+$ curl -XPUT -d $'The answer is 43\n' localhost:8080/api/v1/answer -D -
+
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+Date: Sat, 12 Jan 2019 09:09:50 GMT
+Content-Length: 0
+
+$ curl -XGET localhost:8080/api/v1/answer -D -
+
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+X-Version: 12ba4eb
+Date: Sat, 12 Jan 2019 09:09:58 GMT
+Content-Length: 17
+
+The answer is 43
+
+$ curl -XPUT -d $'The answer is 42\n' \
+    localhost:8080/api/v1/answer?ver=123456 -D -
+
+HTTP/1.1 400 Bad Request
+Date: Sat, 12 Jan 2019 09:10:16 GMT
+Content-Length: 29
+Content-Type: text/plain; charset=utf-8
+
+{"error":"version mismatch"}
+
+$ curl -XPUT -d $'The answer is 42\n' \
+    localhost:8080/api/v1/answer?ver=12ba4eb -D -
+
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+Date: Sat, 12 Jan 2019 09:10:24 GMT
+Content-Length: 0
+
+$ curl -XGET localhost:8080/api/v1/answer -D -
+
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+X-Version: 12ba4ec
+Date: Sat, 12 Jan 2019 09:10:33 GMT
+Content-Length: 17
+
+The answer is 42
+
+$ curl -XDELETE localhost:8080/api/v1/answer?ver=12ba4ec -D -
+
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream
+Date: Sat, 12 Jan 2019 09:10:49 GMT
+Content-Length: 0
+
+$ curl -XGET localhost:8080/api/v1/answer -D -
+
+HTTP/1.1 400 Bad Request
+Date: Sat, 12 Jan 2019 09:10:53 GMT
+Content-Length: 26
+Content-Type: text/plain; charset=utf-8
+
+{"error":"Key not found"}
+Как видите, получилась хоть и простенькая, но вполне полноценная key-valye СУБД. Которая нормально выдержит несколько тысяч одновременных соединений, прошу заметить. Разработка в неспешном ритме заняла один вечер. От меня потребовалось написать 200 строк кода, и все просто заработало.
+
+Это сильно отличается от моего опыта написания аналогичной СУБД на RocksDB и C++. Там мне пришлось с нуля написать простенький HTTP-сервер, потому что нормального не нашлось, прямо сильно думать о перемещении объектов и умных указателях, а прикрутить libevent так, чтобы код напоминал Futures в Scala, а не мешанину из колбеков, я и вовсе не осилил. В такие моменты лучше понимаешь, за что люди недолюбливают С++ и за что любят Go.
+
+Само собой разумеется, данная заметка не претендует на то, чтобы быть полным описанием Badger. Больше информации вы найдете в документации библиотеки. Помимо прочего, из нее вы узнаете, что Badger также позволяет указывать время жизни значений (TTL), поддерживает range scans, в том числе по префиксам ключей, что обеспечиваемый им уровень изоляции является serializable snapshot isolation, и так далее. Кстати, многие альтернативные реализации LSM tree не могут объяснить, какой уровень изоляции они дают. Это является еще одной причиной, почему меня заинтересовал именно Badger.
+
+Метки: Go.

@@ -1,0 +1,118 @@
+Как послать HTTP-запрос и пропарсить ответ регулярными выражениями на Java, а также сравнение с аналогичной программой на Scala
+25 июня 2014
+
+Продолжаем разбираться в тонкостях использования очень занятного и широко используемого языка программирования Java, который, как мы выяснили, хочешь не хочешь, а знать приходится. Сегодня я намерен попробовать решить с его помощью типичную задачу «скачать страничку из интернета и выдрать данные из нее регулярными выражениями». Если вы посмотрите мои доисторические посты с меткой «Perl», то обнаружите, что возникают такие задачи сплошь и рядом.
+
+JDK включает в себя классы, позволяющие ходить в интернеты по HTTP, и вроде как они даже способны на такие нетривиальные вещи, как смену User-Agent. Но в настоящих, больших, Java-приложениях все же не рекомендуется их использовать ну хотя бы в силу малой гибкости. Поэтому в рамках данной конкретной заметки мы воспользуемся HTTP-клиентом для Java от компании Apache. Кроме того, нам понадобится несколько дополнительных пакетов того же производителя:
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+            <version>4.3.3</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>1.3.2</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
+            <version>3.3.2</version>
+        </dependency>
+    </dependencies>
+Поскольку новую интересную задачку я придумать не смог, попробуем тупо переписать программу, получающую список наиболее популярных постов за месяц в блоге, который вы сейчас читаете. Ранее такая программа была написана мной на Scala. Я до сих пор использую ее для генерации кода виджета, который вы можете наблюдать в меню сайта. Заодно сравним код на Java с аналогичным кодом на Scala.
+
+Код основного метода:
+
+private static void process(String domainStr,
+                            String dateStr,
+                            String numberStr) throws IOException {
+  String s = getUrl("http://www.liveinternet.ru/stat/" + domainStr +
+                    "/pages.html?date=" + dateStr +
+                    "&period=month&total=yes&per_page=100");
+  ArrayList< Pair<String, Integer> > pages =
+    parseLiveinternatStat(domainStr, s);
+  int maxNumber = Integer.parseInt(numberStr);
+  int currentNumber = 0;
+  System.out.println("<ul>");
+  for(Pair<String, Integer> p : pages) {
+    String url = p.getLeft();
+    int views = p.getRight();
+    String title = getPageTitle(url);
+    String end = ending(views);
+    System.out.printf("<li><a href=\"%s\">%s</a> %d просмотр%s " +
+                      "за месяц</a></li>\n", url, title, views, end);
+    currentNumber++;
+    if(currentNumber >= maxNumber) break;
+  }
+  System.out.println("</ul>");
+}
+Метод getUrl загружает веб-страничку с заданным URL, возвращая ее содержимое в виде String. Метод parseLiveinternatStat парсит это содержимое и возвращает список пар url:число_просмотров, а метод getPageTitle получает title заданной страницы в блоге. Поскольку в Java до сих пор нет поддержки кортежей, мы используем пакет org.apache.commons commons-lang3, содержащий объявление класса Pair. Это, конечно, всего лишь пары, а не полноценные кортежи, но все же лучше, чем ничего.
+
+Исходный код метода getUrl:
+
+private static String getUrl(String uri) throws IOException {
+  HttpGet req = new HttpGet(uri);
+  req.setHeader("User-Agent", DEFAULT_USER_AGENT);
+  try ( CloseableHttpClient client = HttpClients.createDefault();
+        CloseableHttpResponse response = client.execute(req) ) {
+    InputStream inputStream = response.getEntity().getContent();
+    return IOUtils.toString(inputStream);
+  }
+}
+Собственно, это и есть вся работа с HTTP-клиентом. Для преобразования InputStream, содержащего тело HTTP-ответа, в String используется готовый static метод IOUtils.toString из пакета org.apache.commons commons-io.
+
+Метод parseLiveinternatStat получился таким:
+
+private static ArrayList< Pair<String, Integer> >
+    parseLiveinternatStat(String domainStr, String s) {
+  Pattern pattern = Pattern.compile(
+                      "(?s)for=\"id_\\d+\"><a href=" +
+                      "\"([^\"]+)\"[^>]*>.*?<td>([\\d,]+)</td>");
+  Matcher matcher = pattern.matcher(s);
+  ArrayList< Pair<String, Integer> > result = new ArrayList<>();
+  String rootUrl = "http://" + domainStr + "/";
+  String pageUrlStart = "http://" + domainStr + "/page/";
+  String tagUrlStart = "http://" + domainStr + "/tag/";
+  while(matcher.find()) {
+    String url = matcher.group(1);
+    if(url.equals(rootUrl)) continue;
+    if(url.startsWith(pageUrlStart)) continue;
+    if(url.startsWith(tagUrlStart)) continue;
+    String numStr = matcher.group(2);
+    Integer num = Integer.parseInt(numStr.replace(",", ""));
+    result.add(Pair.of(url, num));
+  }
+  return result;
+}
+К счастью, в состав JDK входит все необходимое для работы с регулярными выражениями, так что здесь обошлось без сторонних библиотек.
+
+Наконец, метод getPageTitle тривиален:
+
+private static String getPageTitle(String url) throws IOException {
+  String s = getUrl(url);
+  Pattern pattern = Pattern.compile("<h2>(.*?)</h2>");
+  Matcher m = pattern.matcher(s);
+  if(!m.find()) throw new IOException("Failed to find page title");
+  return m.group(1);
+}
+Собственно, это все. Полную версию исходного кода можно посмотреть здесь.
+
+Давайте попробуем сравнить его c кодом абсолютно такого же приложения на языке Scala. Сразу бросается в глаза, что код на Scala получился существенно, на 40%, короче — 63 строки против 106. Кроме того, код на Scala читается намного проще. В нем все просто и лаконично, как если бы мы писали на каком-нибудь Python. В то же время код на Java полон всяческих public static void и в нем трижды пришлось написать громоздкую конструкцию ArrayList<Pair<String, Integer>>. Конечно, можно было бы ее написать один раз, но это привело бы к созданию больших сложных методов.
+
+В защиту Java нужно сказать, что standalone jar у него получился существенно легче, 1.6 Мб против 7.1 Мб у Scala. Что неудивительно, ведь Scala приходится таскать за собой множество собственных классов, включая свою реализацию коллекций и так далее. Но не факт, что разница будет столь заметна в более крупных приложениях. Ну и раз мы коснулись холивара «Java против Scala», нужно отметить, что многие библиотеки для Scala представляют собой обертки над существующими Java-библиотекамми. Как следствие, код на Scala обычно на сколько-то процентов проигрывает Java в плане скорости дробления чисел, что в частности подтверждают бенчмарки на shootout. Ну или приходится работать из Scala напрямую с Java-библиотеками, из-за чего код рискует получится несколько менее читабельным.
+
+Лично я считаю, что при программировании под JVM абсолютно весь новый код следует писать на Scala. В эпоху гигабитных каналов и терабайтных жестких дисков никому нет дела до размера приложения. Что же касается упомянутой возможной проблемы с производительностью, скорее всего на практике разницу между Scala и Java никто и никогда не заметит. Ну а в совсем уж крайнем случае ничто не мешает взять да и переписать узкое место на Java.
+
+Как известно, количество багов на 10_000 строк кода — величина постоянная, а следовательно Scala нужно отдавать предпочтение хотя бы из-за на 40% более короткого кода. Хотя следует иметь в виду и другие преимущества языка, в частности — очень элегантную как бы перегрузку операторов, возможность в случае необходимости использовать ленивые вычисления, нормальную поддержку паттерн-матчинга и интерполяции строк, а также более удачные генерики. Следовало бы также назвать поддержку нормального вывода типов, псевдонимов типов, неявных преобразований, автоматическую генерацию сеттеров-геттеров и, в случае использования case-классов, методов hashCode и equals, но все это по сути уже включено в поинт про более короткий код.
+
+Разумеется, что-то из названного может появиться в какой-нибудь Java 10, но я не верю, что Java когда-нибудь достигнет лаконичности Scala. В самом деле, зачем усложнять язык, который изначально задумывался, как простой, добавляя в него кортежи, нормальный автоматический вывод типов (аналог ключевого слова var из Scala и C#) и так далее, если уже есть язык под JVM, в котором все это есть? Да и зачем, собственно, ждать пять-семь лет до появления Java 10, когда все уже есть готовое и обкатанное?
+
+Ну и в завершение вброса хотелось бы отметить, что для работы с HTTP коллеги, специализирующиеся на Java, также советовали посмотреть Ning Async Http Client.
+
+Дополнение: GUI-приложение на Swing с иконкой в трее — реальный пример проблемы с кроссплатформенностью в Java
+
+Метки: Java, Scala, Функциональное программирование.
+

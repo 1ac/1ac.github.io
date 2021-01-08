@@ -1,0 +1,132 @@
+Простой пример работы с PostgreSQL на Python
+18 июля 2016
+
+Мне нравится Python, а также мне нравится PostgreSQL. И вот я подумал — ей, а почему бы не использовать их вместе? :) Для работы с PostgreSQL в мире Python большой популярностью пользуется пакет psycopg2. Но он, по всей видимости, до сих пор не поддерживает prepared statements. Поэтому для своих задач я пока что остановился на чуть менее популярном пакете py-postgresql. Этот пакет, как я понимаю, поддерживает все, что нужно.
+
+Дополнение: Выяснилось, что py-postgresql не работает с последними версиями PostgreSQL. См заметку Работа с PostgreSQL на Python с помощью psycopg2.
+
+Ставится он, как обычно, через pip. Например (но лучше пользоваться virtualenv):
+
+sudo pip3 install py-postgresql
+При изучении новой библиотеки сначала я пытаюсь поделать с ней что-нибудь в REPL. Далее я опускаю приглашение REPL’а, которое >>>.
+
+Создание новой сессии:
+
+import postgresql
+db = postgresql.open('pq://postgres:postgres@localhost:5432/mydb')
+В реальных скриптах, конечно же, не забываем использовать конструкцию with.
+
+Создание схемы, выполнение простых запросов:
+
+db.execute("CREATE TABLE users (id SERIAL PRIMARY KEY, "
+  "login CHAR(64), password CHAR(64))")
+Создание prepared statement и выполнение INSERT-запроса:
+
+ins = db.prepare("INSERT INTO users (login, password) VALUES ($1, $2)")
+
+ins("afiskon", "123")
+# ('INSERT', 1)
+ins("eax", "456")
+# ('INSERT', 1)
+Выполнение SELECT-запроса (делаем trim, так как varchar дополняется пробелами):
+
+db.query("SELECT id, trim(login), trim(password) FROM users")
+# [(1, 'afiskon', '123'), (2, 'eax', '456')]
+К полям можно обращаться как по номерам, так и по именам:
+
+users = db.query("SELECT * FROM users WHERE id = 1");
+
+users[0][0]
+# 1
+
+users[0]["id"]
+# 1
+
+users[0]["login"].strip()
+# 'afiskon'
+Выполнение UPDATE- и DELETE-запросов:
+
+update = db.prepare("UPDATE users SET password = $2 where login = $1")
+
+update("eax", "789")
+# ('UPDATE', 1)
+
+delete = db.prepare("DELETE FROM users WHERE id = $1")
+
+delete(3)
+# ('DELETE', 0)
+
+db.query("DELETE FROM users WHERE id = 3")
+# ('DELETE', 0)
+Пример выполнения транзакции:
+
+with db.xact() as xact:
+    db.query("SELECT id FROM users")
+# [(1,), (2,)]
+Пример выполнения rollback:
+
+with db.xact() as xact:
+    db.query("SELECT id FROM users")
+    xact.rollback()
+Вызов хранимых процедур:
+
+ver = db.proc("version()")
+
+ver()
+# 'PostgreSQL 9.5 ...'
+Работа с курсорами:
+
+db.execute("DECLARE my_cursor CURSOR WITH HOLD FOR "
+  "SELECT id, trim(login) FROM users")
+
+c = db.cursor_from_id("my_cursor")
+
+c.read()
+# [(1, 'afiskon'), (2, 'eax')]
+
+c.read()
+# []
+
+c.close()
+Можно ограничить количество считываемых элементов:
+
+c.read(100)
+Попробуйте заполнить таблицу таким образом и повторить эксперимент:
+
+for i in range(1, 1000):
+    ins("user" + str(i), "pass" + str(i))
+И напоследок рассмотрим наброски типа более гибкой альтернативы pgbench:
+
+#!/usr/bin/env python3
+
+import time
+import threading
+import postgresql
+
+testtime = 10
+nthreads = 4
+
+def worker():
+    nqueries = 0
+    with postgresql.open('pq://eax@192.168.111.222/eax') as db:
+        query = db.prepare("SELECT * FROM themes WHERE id = 1")
+        starttime = time.time()
+        while time.time() - starttime < testtime:
+            query()
+            nqueries = nqueries + 1
+    print("Thread " + str(threading.get_ident()) + " - total " +
+                      str(nqueries) + " queries executed")
+
+for i in range(nthreads):
+    t = threading.Thread(target = worker)
+    t.start()
+Ссылки по теме:
+
+https://pypi.python.org/pypi/py-postgresql;
+http://pythonhosted.org/py-postgresql/;
+https://wiki.postgresql.org/wiki/Python;
+А как вы нынче работаете с базами данных на Python?
+
+Дополнение: Пишем REST-сервис на Python с использованием Flask
+
+Метки: PostgreSQL, Python, СУБД.

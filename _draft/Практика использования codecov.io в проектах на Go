@@ -1,0 +1,127 @@
+Практика использования codecov.io в проектах на Go
+29 апреля 2020
+
+Ранее мы научились писать модульные тесты на языке Go и измерять степень покрытия кода тестами. Также недавно мы познакомились с GitHub Actions и узнали, как с его помощью автоматически собирать и тестировать проект. Казалось бы, проверять code coverage при помощи GitHub Actions должно быть проще простого. Используем материалы двух предыдущих статей, и готово! Но если бы все было так банально, вы бы сейчас не читали эти строки.
+
+Оказывается, разработчиков редко волнует значение code coverage в моменте. Что на самом деле интересно, это то, как pull request меняет покрытие кода по сравнению с веткой master. Еще интереснее, какие строки кода станут покрыты или перестанут быть покрыты тестами, если смержить заданный pull request. Связано это с тем, что в обычно решается задача либо увеличить покрытие кода тестами, либо убедиться, что новый код имеет адекватное покрытие. Увы, из коробки в языке Go нельзя получить ответы на эти вопросы. Однако данный функционал реализован в сервисе codecov.io. Сервис бесплатен для открытых проектов и стоит вполне разумных денег для закрытых.
+
+За основу был взят демонстрационный проект к заметке про модульные тесты. В первую очередь он был переведен на модули, само собой разумеется, с вендорингом всех зависимостей. Также версия minimock была обновлена на последнюю.
+
+Далее настраиваем GitHub Actions, как-то так:
+
+name: all-checks
+on:
+  push:
+    branches:
+     - master
+  pull_request:
+env:
+  GO_VERSION: 1.14
+jobs:
+  all-checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+    - name: set up go ${{env.GO_VERSION}}
+      uses: actions/setup-go@v2
+      with:
+        go-version: ${{env.GO_VERSION}}
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v1
+      with:
+        fetch-depth: 1
+    - name: Install build tools
+      run: go install github.com/gojuno/minimock/v3/cmd/minimock
+    - name: Run go generate
+      run: go generate ./...
+    - name: Run tests
+      run: go test -count=1 -v ./...
+    - name: Check code coverage
+      run: |
+       go test -coverprofile=coverage.tmp.out ./...
+        cat coverage.tmp.out | grep -v _mock.go > coverage.out
+        go tool cover -html=coverage.out -o coverage.html
+    - name: Add coverage.out to artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: coverage-out
+        path: ./coverage.out
+    - name: Add coverage.html to artifacts
+      uses: actions/upload-artifact@v1
+      with:
+        name: coverage-html
+        path: ./coverage.html
+Тут уже есть несколько нюансов.
+
+Во-первых, утилита minimock так просто не установится командой go install в проекте с вендорингом. Ведь код нашего проекта от этой утилиты, строго говоря, не зависит, поэтому незачем качать ее в каталог vendor. Но именно там ее попытается искать команда go install. В мире Go эта проблема решается созданием файла с именем tools.go:
+
+// +build tools
+
+package tools
+
+import _ "github.com/gojuno/minimock/v3/cmd/minimock"
+Вообще-то, подобный импорт в Go завершится с ошибкой. Но поскольку tools.go находится под билд-тэгом, то файл никогда не соберется. А раз файл есть и в нем есть импорты, go mod vendor скачает minimock и положит его в каталог vendor. Ужасный хак, но работает.
+
+Во-вторых, устанавливать Go обязательно нужно при помощи actions/setup-go@v2 с акцентом на v2. Если воспользоваться v1, то $GOPATH/bin не будет добавлен в переменную окружения $PATH. В итоге будет непросто вызвать minimock, а он нужен для генерации mock’ов при помощи go generate.
+
+Дальше ничего особенного, если не считать сохранения файлов coverage.out и coverage.html в артефактах. Их можно будет посмотреть в браузере после того, как джоба завершится. Этот момент ничем не примечателен, просто раньше мы не использовали артефакты в GitHub Actions.
+
+Если вас не очень интересует динамика изменения code coverage, вы не хотите платить за codecov.io, или вы просто не очень любите зависеть от лишних сервисов, то на этом шаге можно остановится. Просто проверить, что код покрыт не менее чем на N%, можно таким скриптом:
+
+#!/usr/bin/env python3
+
+import sys
+import argparse
+import subprocess
+import re
+
+parser = argparse.ArgumentParser(description='Check code coverage')
+parser.add_argument(
+    '-m', '--minimum', metavar='N', type=float, required=True,
+    help='minimum code coverage, percents')
+parser.add_argument(
+    '-f', '--fname', metavar='F', type=str, required=True,
+    help='path to golang coverage.out file')
+args = parser.parse_args()
+fname = args.fname
+required = args.minimum
+
+cmd = "go tool cover -func={}".format(fname)
+out = subprocess.check_output(cmd, shell=True).decode('utf-8')
+m = re.search("""(?si)total:.*?([\d\.)]+)\%$""", out)
+coverage = float(m.group(1))
+
+print("Current coverage: {:.2f}, required: {:.2f}".format(
+    coverage, required))
+
+if coverage >= required:
+    print("Check passed.")
+    sys.exit(0)
+else:
+    print("CHECK FAILED!")
+    sys.exit(1)
+Пример его использования:
+
+./check-coverage.py --fname=./coverage.out --minimum=80
+Дописываете команду в приведенный выше YAML-файл, и проблема решена.
+
+Если же вы хотите воспользоваться именно codecov.io, то необходимо положить в репозиторий проекта bash-скрипт для загрузки отчетов в сервис. После этого правим YAML’ичек таким образом:
+
+    ....
+        go tool cover -html=coverage.out -o coverage.html
+    - name: Upload coverage report to codecov.io
+      run: ./scripts/codecov-upload.sh -f ./coverage.out ⏎
+              -y ./codecov.yml -n coverage-report -F
+    - name: Add coverage.out to artifacts
+    ...
+Файл codecov.yml пока что создаем чисто символический:
+
+comment:
+  layout: "diff, flags, files"
+Наконец, добавляем в репозиторий приложение Codecov. Этот шаг не обязательный, но он добавит в проект дополнительные проверки. На них можно повесить рестрикты в настройках репозитория.
+
+С приложением или без, к вам в pull request’ы начнет приходить бот и оставлять комментарии о том, как pull request’ы меняют code coverage. По ссылкам из комментария можно получить более подробную информацию по отдельным файлам и строчкам в них. Как все это хозяйство выглядит в итоге, можно посмотреть в этом пулл реквесте.
+
+И не забудьте самый главный шаг — добавить бейджики в README. А на этом у меня все. Как обычно, буду рад вашим вопросам, комментариям и дополнениям.
+
+Метки: Go, Облака, Разработка, Тестирование.

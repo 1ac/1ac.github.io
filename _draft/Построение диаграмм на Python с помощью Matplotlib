@@ -1,0 +1,226 @@
+Построение диаграмм на Python с помощью Matplotlib
+25 сентября 2017
+
+Бывает, что нужно по-быстрому визуализировать какие-то данные — построить графики для презентации или вроде того. Есть много способов сделать это. Например, можно открыть CSV-файл в LibreOffice или Google Docs и построить графики в нем. Но что, если диаграммы нужно строить регулярно, а значит предпочтительнее делать это автоматически? Вот тут-то на помощь и приходит Python с его потрясающей библиотекой Matplotlib.
+
+Примечание: Для решения той же задачи в свое время мне доводилось использовать Scala Chart. Однако, как вы сами сейчас убедитесь, Matplotlib куда гибче, да и графики у него получаются намного красивее. Если вас интересует тема визуализации данных, вам стоит обратить внимание на мои стары посты, посвященные Graphviz, а также JavaScript-библиотекам Flot и Dracula.
+
+Не будем ходить вокруг да около, лучше сразу перейдем к примерам. Пожалуй, простейший график, который можно построить в Matplotlib, это график синуса и косинуса:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import math
+
+dpi = 80
+fig = plt.figure(dpi = dpi, figsize = (512 / dpi, 384 / dpi) )
+mpl.rcParams.update({'font.size': 10})
+
+plt.axis([0, 10, -1.5, 1.5])
+
+plt.title('Sine & Cosine')
+plt.xlabel('x')
+plt.ylabel('F(x)')
+
+xs = []
+sin_vals = []
+cos_vals = []
+
+x = 0.0
+while x < 10.0:
+    sin_vals += [ math.sin(x) ]
+    cos_vals += [ math.cos(x) ]
+    xs += [x]
+    x += 0.1
+
+plt.plot(xs, sin_vals, color = 'blue', linestyle = 'solid',
+         label = 'sin(x)')
+plt.plot(xs, cos_vals, color = 'red', linestyle = 'dashed',
+         label = 'cos(x)')
+
+plt.legend(loc = 'upper right')
+fig.savefig('trigan.png')
+Я думаю, что код не нуждается в пояснениях. В крайнем случае, вы можете полистать официальную документацию или почитать вывод help() в REPL’е.
+
+Получившийся график:
+
+График синуса и косинуса в Matplotlib
+
+Однако на практике часто нужно построить график функции не от абстрактного вещественного числа, а от вполне конкретного времени. И в этом случае хочется, чтобы по оси OX были подписаны не абстрактные 1, 2, 3, а вполне конкретные временные метки. Для примера рассмотрим построение графика регистрации новых доменов в зоне RU за разное время с разбивкой по регистраторам:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import datetime as dt
+import csv
+
+dates = []
+values = {}
+
+with open('ru-newreg.csv', newline = '') as f:
+    for row in csv.reader(f, delimiter = ',', quotechar = '"'):
+        if dates == []:
+            dates = [
+                dt.datetime.strptime(
+                    "{}-01".format(d),
+                    '%Y-%m-%d'
+                ).date()
+                for d in row[1:]
+            ]
+            continue
+        values[ row[0] ] = row[1:]
+
+dpi = 80
+fig = plt.figure(dpi = dpi, figsize = (512 / dpi, 384 / dpi) )
+mpl.rcParams.update({'font.size': 10})
+
+plt.title('RU New Domain Names Registration')
+plt.xlabel('Year')
+plt.ylabel('Domains')
+
+ax = plt.axes()
+ax.yaxis.grid(True)
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+ax.xaxis.set_major_locator(mdates.YearLocator())
+
+for reg in values.keys():
+    plt.plot(dates, values[reg], linestyle = 'solid', label = reg)
+
+plt.legend(loc='upper left', frameon = False)
+fig.savefig('domains.png')
+Данные были получены с ныне уже закрытого сайта stat.nic.ru, который, впрочем, все еще доступен на web.archive.org. Результирующий график:
+
+График регистрации новых доменов, построенный в Matplotlib
+
+Что еще часто строят, это столбчатые диаграммы. В качестве примера возьмем данные из заметки Поиск по географическим данным при помощи PostGIS и построим диаграмму, отображающую сколько точек на карте к какому типу (заправка, кафе и так далее) относятся. Чтобы было чуть интереснее, сделаем вид, что в прошлом году точек каждого вида было на 10% меньше, и попытаемся отразить это изменение:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import datetime as dt
+import csv
+
+data_names = ['cafe', 'pharmacy', 'fuel', 'bank', 'waste_disposal',
+              'atm', 'bench', 'parking', 'restaurant',
+              'place_of_worship']
+data_values = [9124, 8652, 7592, 7515, 7041, 6487, 6374, 6277,
+               5092, 3629]
+
+dpi = 80
+fig = plt.figure(dpi = dpi, figsize = (512 / dpi, 384 / dpi) )
+mpl.rcParams.update({'font.size': 10})
+
+plt.title('OpenStreetMap Point Types')
+
+ax = plt.axes()
+ax.yaxis.grid(True, zorder = 1)
+
+xs = range(len(data_names))
+
+plt.bar([x + 0.05 for x in xs], [ d * 0.9 for d in data_values],
+        width = 0.2, color = 'red', alpha = 0.7, label = '2016',
+        zorder = 2)
+plt.bar([x + 0.3 for x in xs], data_values,
+        width = 0.2, color = 'blue', alpha = 0.7, label = '2017',
+        zorder = 2)
+plt.xticks(xs, data_names)
+
+fig.autofmt_xdate(rotation = 25)
+
+plt.legend(loc='upper right')
+fig.savefig('bars.png')
+Результат:
+
+Столбчатая диаграмма в Matplotlib
+
+Те же данные можно отобразить, расположив столбики горизонтально:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import datetime as dt
+import csv
+
+data_names = ['cafe', 'pharmacy', 'fuel', 'bank', 'w.d.', 'atm',
+              'bench', 'parking', 'restaurant', 'p.o.w.']
+data_values = [9124, 8652, 7592, 7515, 7041, 6487, 6374, 6277,
+               5092, 3629]
+
+dpi = 80
+fig = plt.figure(dpi = dpi, figsize = (512 / dpi, 384 / dpi) )
+mpl.rcParams.update({'font.size': 9})
+
+plt.title('OpenStreetMap Point Types')
+
+ax = plt.axes()
+ax.xaxis.grid(True, zorder = 1)
+
+xs = range(len(data_names))
+
+plt.barh([x + 0.3 for x in xs], [ d * 0.9 for d in data_values],
+         height = 0.2, color = 'red', alpha = 0.7, label = '2016',
+         zorder = 2)
+plt.barh([x + 0.05 for x in xs], data_values,
+         height = 0.2, color = 'blue', alpha = 0.7, label = '2017',
+         zorder = 2)
+plt.yticks(xs, data_names, rotation = 10)
+
+plt.legend(loc='upper right')
+fig.savefig('barshoris.png')
+Соответствующая диаграмма:
+
+Горизонтальная столбчатая диаграмма в Matplotlib
+
+И последний на сегодня вид диаграмм — круговая диаграмма, или «пирог». Для примера попробуем визуализировать распределение кафе по различным городам России:
+
+#!/usr/bin/env python3
+# vim: set ai et ts=4 sw=4:
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import datetime as dt
+import csv
+
+data_names = ['Москва', 'Санкт-Петербург', 'Сочи', 'Архангельск',
+              'Владимир', 'Краснодар', 'Курск', 'Воронеж',
+              'Ставрополь', 'Мурманск']
+data_values = [1076, 979, 222, 189, 137, 134, 124, 124, 91, 79]
+
+dpi = 80
+fig = plt.figure(dpi = dpi, figsize = (512 / dpi, 384 / dpi) )
+mpl.rcParams.update({'font.size': 9})
+
+plt.title('Распределение кафе по городам России (%)')
+
+xs = range(len(data_names))
+
+plt.pie(
+    data_values, autopct='%.1f', radius = 1.1,
+    explode = [0.15] + [0 for _ in range(len(data_names) - 1)] )
+plt.legend(
+    bbox_to_anchor = (-0.16, 0.45, 0.25, 0.25),
+    loc = 'lower left', labels = data_names )
+fig.savefig('pie.png')
+Полученная круговая диаграмма:
+
+Круговая диаграмма в Matplotlib
+
+Выше была рассмотрена лишь малая часть возможностей Matplotlib. Чтобы получить более полное представление о всей мощи этой библиотеки, советую заглянуть в галерею построенных с ее помощью графиков на официальном сайте. Что же до исходников к этому посту, как обычно, вы найдете их на GitHub.
+
+А чем вы строите диаграммы и, если не секрет, как они при этом выглядят?
+
+Дополнение: См также заметки Примеры использования Python-библиотеки NumPy, Визуализация проведенных радиосвязей с помощью Matplotlib и Basemap и Рисуем диаграммы Вольперта-Смита на Python.
+
+Метки: Python.

@@ -1,0 +1,362 @@
+Полный мониторинг системы при помощи Nagios 4
+9 сентября 2015
+
+Когда в системе что-то ломается или начинает вести себя необычным образом, пользователи дружно страдают. Следовательно, в этом случае нужно как можно скорее уведомить кого-нибудь о поломке. А еще лучше было бы предвидеть возникновение проблем заранее. В данной заметке будет описана установка и настройка Nagios, который позволяет вполне успешно решить такие задачи.
+
+Инварианты
+В большинстве систем есть ряд инвариантов, которые никогда не должны нарушаться. Вот некоторые примеры возможных нарушений:
+
+Load average на одной из машин стал больше X;
+Свободной памяти на одной из машин осталось меньше X;
+Свободного места на диске у одной из машин осталось меньше X;
+Слишком много открытых файловых дескрипторов на машине X;
+Сильно греется проц, скоро развалится диск, малый заряд UPS;
+Высокий сетевой трафик, disk io, кончается своп, ну и так далее;
+Один из хостов не пингуется или пингуется со слишком большим RTT;
+Что-то перестало резолвиться по DNS;
+Доступны более новые версии установленных пакетов;
+На одну из машин залогинилось подозрительно много юзеров;
+Есть критические ошибки в логах за последние X минут;
+Число некритичных ошибок за последние X минут превысило Y;
+Лежит или медленно отвечает PostgreSQL, Redis, RabbitMQ, …;
+SSL-сертификат скоро истекает;
+99-ый процентиль времени ответа сервиса сильно больше обычного;
+Не ходит почта, SMS, пуши, …;
+Нужно пополнить баланс в стороннем сервисе (AWS, Logentries, …);
+Подозрительно большие расходы в стороннем сервисе;
+В тестовом окружении не удалось восстановиться из бэкапа с прода;
+Сервис стал недоступен из Зеленограда и ЮАР;
+По внутренним хелсчекам сервиса мы уперлись в один из трэдпулов;
+Как видите, практически в любом сервисе можно без труда найти два десятка инвариантов, а то и больше, которые никогда не должны нарушаться, и которые довольно легко мониторить автоматически. Если что-то сломалось, начинаем рассылать письма админам, SMS начальству, звонить на телефоны кодерам.
+
+Установка Nagios
+Нас интересует новый Nagios, который версии 4. Готового deb-пакета для него почему-то нет, придется собирать все из исходных кодов. Поэтому разворачивать сервер Nagios’а имеет смысл в контейнере вроде Vagrant или Docker. Также далее подразумевается, что вы помните о необходимости ограничить доступ к серверу при помощи фаервола, шифровать HTTP-трафик, используя для этого прокси-сервер вроде Nginx, и так далее. Эти вопросы мы уже рассматривали ранее, поэтому сейчас не будет останавливаться на них снова.
+
+Следует отметить, что в реальных условиях вам обязательно нужно как минимум два сервера с Nagios. Потому что кто-то должен мониторить мониторинг. Иначе при его падении вы не получите никаких алертов и будете думать, что все хорошо и что все работает.
+
+Ставим Apache и PHP:
+
+sudo apt-get install apache2
+sudo a2dissite 000-default
+sudo service apache2 reload
+sudo apt-get install php5 libapache2-mod-php5 php5-mcrypt
+Какая-либо СУБД для работы Nagios не требуется.
+
+Создаем пользователя и группу:
+
+sudo useradd nagios
+sudo groupadd nagcmd
+sudo usermod -a -G nagcmd nagios
+Тянем зависимости:
+
+sudo apt-get update
+sudo apt-get install build-essential libgd2-xpm-dev openssl \
+  libssl-dev xinetd apache2-utils
+Ставим последний стабильный Nagios (на момент написания поста — 4.0.8):
+
+wget http://prdownloads.sourceforge.net/path/to/file.tar.gz
+tar -xvzf nagios-4.0.8.tar.gz
+cd nagios-4.0.8/
+./configure --with-nagios-group=nagios --with-command-group=nagcmd
+make all
+sudo make install
+sudo make install-commandmode
+sudo make install-init
+sudo make install-config
+sudo /usr/bin/install -c -m 644 sample-config/httpd.conf \
+  /etc/apache2/sites-available/nagios.conf
+Добавляем пользователя www-data в группу nagcmd:
+
+sudo usermod -G nagcmd www-data
+Ставим последнюю стабильную версию плагинов:
+
+cd ..
+wget http://nagios-plugins.org/download/nagios-plugins-2.1.1.tar.gz
+tar -xvzf nagios-plugins-2.1.1.tar.gz
+cd nagios-plugins-2.1.1/
+./configure --with-nagios-user=nagios --with-nagios-group=nagios \
+  --with-openssl
+make
+sudo make install
+Далее:
+
+sudo a2enmod rewrite
+sudo a2enmod cgi
+sudo ln -s /etc/apache2/sites-available/nagios.conf \
+  /etc/apache2/sites-enabled/
+Создаем пользователя для доступа к Nagios:
+
+sudo htpasswd -c /usr/local/nagios/etc/htpasswd.users nagiosadmin
+Пользователя должны звать именно nagiosadmin. Иначе вы сможете зайти в веб-интерфейс, но будете видеть повсюду ошибку «It appears as though you do not have permission to view information for any of the hosts you requested».
+
+Прописываем Nagios на автозагрузку:
+
+sudo ln -s /etc/init.d/nagios /etc/rcS.d/S99nagios
+Далее:
+
+sudo service nagios start
+sudo service apache2 restart
+Можно зайти в http://example.ru/nagios/ под созданным ранее пользователем. Если вы увидите там алерты на своп, которого на машине попросту нет, не пугайтесь. Эту проблему мы скоро устраним.
+
+Примеры конфигурации
+Открываем /usr/local/nagios/etc/nagios.cfg. Это главный файл конфигурации. Комментируем все строки с cfg_file и cfg_dir, добавляем:
+
+cfg_file=/usr/local/nagios/etc/objects/commands.cfg
+cfg_dir=/usr/local/nagios/etc/monitoring-configs/conf/
+Также проверяем, что есть следующие строчки (у меня были):
+
+check_external_commands=1
+interval_length=60
+accept_passive_service_checks=1
+accept_passive_host_checks=1
+… и правим notification_timeout:
+
+notification_timeout=120
+Дэфолтный таймаут в 30 секунд может быть слишком мал для некоторых нотификации, например, звонков на мобильный телефон и посылки SMS.
+
+Заводим новый Git-репозиторий, в котором мы будем хранить настройки Nagios. Репозиторий будет содержать примерно следующие файлы:
+
+conf
++-- commands
+|   +-- commands.cfg
++-- contactgroups
+|   +-- contactgroups.cfg
++-- contacts
+|   +-- contact1.cfg
+|   +-- generic.cfg
++-- hostgroups
+|   +-- hostgroups.cfg
++-- hosts
+|   +-- cassandra.cfg
+|   +-- couchbase.cfg
+|   +-- generic.cfg
++-- servicegroups
+|   +-- .gitkeep
++-- services
+|   +-- backends.cfg
+|   +-- generic.cfg
++-- timeperiods
+    +-- timeperiods.cfg
+Конфиги мы положим не в корне репозитория, чтобы рядом с конфигами можно было держать и какие-то утилиты, например, необходимые для посылки уведомлений.
+
+Файл conf/hosts/generic.cfg:
+
+define host {
+  name generic-host
+  register 0
+
+  # Как часто проводить проверку в минутах
+  check_interval 1
+
+  # Сколько минут подождать перед проверкой, не поднялся ли уже хост
+  retry_interval 1
+
+  # Сколько проверок должен завалить хост, чтобы считаться упавшим
+  max_check_attempts 2
+
+  # Слать нотификации не чаще одного раза в N минут
+  notification_interval 30
+
+  # Какие типы нотификаций посылать
+  # d - down
+  # u - unreachable
+  notification_options d,u
+
+  check_command check-host-alive
+}
+Чтобы поменьше писать, мы вводим специальный generic-хост, содержащий свойства, одинаковые для всех хостов в системе. Этот хост не будет отображаться в мониторинге, о чем свидетельствует строчка register 0.
+
+Пример описания конкретных хостов (cassandra.cfg):
+
+define host {
+  use generic-host
+  host_name cassandra-1
+  address 172.31.11.22
+  contact_groups devs_email
+}
+
+define host {
+  use generic-host
+  host_name cassandra-2
+  address 172.31.33.44
+  contact_groups devs_email
+}
+Как видите, мы здесь «наследуем» свойства generic-хоста.
+
+Файл conf/hostgroups/hostgroups.cfg позволяет для удобства объединять хосты в группы:
+
+define hostgroup {
+  hostgroup_name linux-boxes
+
+  # группа может включать как другие группы...
+  hostgroup_members monitoring,cassandra
+
+  # ... так и отдельные хосты
+  members metrics
+}
+
+define hostgroup {
+  hostgroup_name cassandra
+  members cassandra-1,cassandra-2
+}
+
+# ...
+Определение групп контактов (файл contactgroups.cfg):
+
+define contactgroup {
+  contactgroup_name devs_email
+}
+
+define contactgroup {
+  contactgroup_name nobody
+}
+Помимо прочего, здесь мы вводим специальную группу nobody, в которой не будет ни одного человека.
+
+В файле conf/contacts/generic.cfg описываем generic-контакт по аналогии с тем, как делали это для хостов:
+
+define contact {
+  name generic-contact
+  register 0
+
+  host_notifications_enabled 1
+  service_notifications_enabled 1
+
+  # d - down
+  # u - unreachable
+  # r - recovery
+  # f - flapping
+  host_notification_options d,u,r,f
+
+  # w - warning
+  # u - unknown
+  # c - critical
+  # r - recovery (OK)
+  # f - flapping
+  service_notification_options w,u,c,r,f
+
+  host_notification_period 24x7
+  service_notification_period 24x7
+}
+В файле conf/timeperiods/timeperiods.cfg описываем период 24x7:
+
+define timeperiod {
+  timeperiod_name 24x7
+  alias 24x7
+  monday    00:00-24:00
+  tuesday   00:00-24:00
+  wednesday 00:00-24:00
+  thursday  00:00-24:00
+  friday    00:00-24:00
+  saturday  00:00-24:00
+  sunday    00:00-24:00
+}
+Теперь на основе generic-контакта можно создать и реальный контакт:
+
+define contact {
+  use generic-contact
+  contact_name afiskon_email
+  email afiskon@example.ru
+  contactgroups devs_email
+  host_notification_commands notify-host-by-email-aws
+  service_notification_commands notify-service-by-email-aws
+}
+Если планируется уведомлять о проблемах не только по email, можно завести аналогичные контакты afiskon_sms, afiskon_call, и другие, а также группы devs_sms, devs_slack, и так далее. У хостов в параметре contact_groups группы можно указывать через запятую.
+
+Определение команд notify-* находятся в файле commands.cfg и являются немного переделанными командами notify-* из файла …/objects/commands.cfg на сервере Nagios. Вместо утилиты /bin/mail в наших командах используется небольшая программа на Scala, посылающая письмо через SMTP-сервер, предоставляемый Amazon SES. Также в файле …/objects/commands.cfg есть определение использованной ранее команды check-host-alive, которая просто шлет ping заданному хосту. При редактировании файла nagios.cfg мы оставили в нем строчку:
+
+cfg_file=/usr/local/nagios/etc/objects/commands.cfg
+… что позволяет использовать check-host-alive и другие команды из этого файла в наших конфигах.
+
+Наконец, сервисы. Сначала generic, по аналогии с хостами и контактами:
+
+define service {
+  name generic-service
+  register 0
+
+  check_interval 1
+  retry_interval 1
+  max_check_attempts 2
+  check_period 24x7
+  notification_period 24x7
+  notification_options w,c,u
+}
+Примеры реальных сервисов:
+
+define service {
+  use generic-service
+  hostgroup_name monitoring
+  service_description ssh
+  check_command check_ssh
+  contact_groups devs_email
+}
+
+define service {
+  use generic-service
+  hostgroup_name monitoring
+  service_description apache
+  check_command check_http
+  contact_groups devs_email
+}
+
+define service {
+  use generic-service
+  hostgroup_name cassandra
+  service_description cassandra
+  check_command check_tcp!9042
+  contact_groups devs_email
+}
+Вместо hostgroup_name можно указывать и конкретный хост, воспользовавшись параметром host_name.
+
+Наконец, на машине, где крутится Nagios, говорим ssh-keygen, прописываем получившийся ключ для доступа к репозиторию с конфигами.
+
+Далее (здесь ubuntu — имя пользователя сисадмина):
+
+cd /usr/local/nagios
+sudo chown -R ubuntu:nagios etc
+cd etc
+git clone git@bitbucket.org:afiskon/monitoring-configs.git
+Проверяем конфиги:
+
+sudo /usr/local/nagios/bin/nagios --verify-config \
+  /usr/local/nagios/etc/nagios.cfg
+Если нет ошибок, говорим:
+
+sudo service nagios restart
+В каталоге /usr/local/nagios/libexec/ вы найдете больше команд для проверки различных сервисов. Их не помешает отлаживать в консоли перед правкой конфигов. Делается это как-то так:
+
+/usr/local/nagios/libexec/check_http --ssl -H example.ru \
+  -u https://example.ru/pix.gif
+Внимательные читатели в этом месте могли заметить, что чего-то не хватает. Как думаете, чего?
+
+NRPE — Nagios Remote Plugin Executor
+Хотелось бы не только проверять, что такие-то сервисы отвечают по HTTP, но и, например, сколько свободной памяти осталось на всех наших машинах. Есть команда check_by_ssh, с помощью которой можно этого добиться. Но иметь одну машину, с которой можно сходить по SSH на любую другую, даже с минимальными правами, очень небезопасно, сами понимаете. Поэтому придумали NRPE. Если простыми словами, то это демон, который позволяет удаленно выполнять только заранее заданное множество команд.
+
+Проблема с NRPE заключается в том, что, как и Nagios, его надо бы везде собирать из исходников. Но делать это на всех машинах руками очень неприятно. Решать эту проблему можно разными способами (Ansible, checkinstall, …). Как вариант, для уже существующих машин можно воспользоваться моим готовым скриптом, а новые машины создавать из образов (типа которые в Amazon называются AMI). Упомянутый скрипт вам может захотеться допилить немного под себя. Например, если у вас свой ДЦ, если вы используете IaaS отличный от AWS, или если используете другой Linux, не Ubuntu.
+
+После того, как NRPE везде развернут, в commands.cfg добавляем:
+
+define command{
+  command_name check_nrpe
+  command_line [skipped]/libexec/check_nrpe -H $HOSTADDRESS$ -c $ARG1$
+}
+В services.cfg как-то так добавляем проверку load average на всех хостах с Linux:
+
+define service {
+  use generic-service
+  hostgroup_name linux-boxes
+  service_description load
+  check_command check_nrpe!check_load
+  contact_groups devs_email
+}
+По аналогии добавляем check_mem, check_disk, check_users, check_zombie_procs и check_total_procs.
+
+Заключение
+Многие интересные вопросы, к сожалению, остались за кадром. Например, Nagios умеет агрегировать данные с других Nagios’ов. Он может пытаться сам чинить упавший сервис. Также он поддерживает иерархические зависимости между сервисами и хостами. Благодаря последнему при смерти какого-нибудь роутера вы получаете алерт только на смерть этого роутера, а не всех хостов, которые за ним находятся. В качестве источника дополнительной информации я всячески рекомендую книгу Learning Nagios 4.
+
+Кстати, благодаря знакомству с Nagios, я стал намного лучше понимать людей, выступающих за ручное шардирование и ручной фейловер. Но это, пожалуй, тема для отдельной заметки.
+
+А чем вы мониторите вашу систему?
+
+Дополнение: Устанавливаем связку из Prometheus и Grafana
+
+Метки: Linux.
