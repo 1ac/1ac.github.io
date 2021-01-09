@@ -6,6 +6,8 @@ category: cheatSheet
 
 Table of contents
 - [Operating modes](#operatingModes)
+- [Operating modes 2](#operatingModes 2)
+
 - [Moving around the text](#movingAroundTheText)
 - [Remove, copy & past](#removeCopyPast)
 - [Macros](#macros)
@@ -26,6 +28,20 @@ ___
 | выйти |		:q ENTER |
 | сохранить и выйти |		:wq ENTER |
 | выйти без сохранения |		:q! Enter |
+
+
+# [Operating modes](#operatingModes2)
+
+ESC 			командный режим
+i 			режим набора текста на текущей позиции курсора
+a 			режим набора текста на следующей позиции курсора
+A 			режим набора текста в конце текущей строки
+o 			режим набора текста на строке ниже, создав её
+O 			режим набора текста на строке ниже, создав её
+:w ENTER 			cохранить
+:q ENTER 			выйти
+:wq ENTER 			сохранить и выйти
+:q! Enter 			выйти без сохранения
 
 ___
 
